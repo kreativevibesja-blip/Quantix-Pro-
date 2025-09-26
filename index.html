@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Quantix Pro Trading AI — Deriv Strategy Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Prevent dashboard flash before auth redirect */
+    body.preauth-hide { visibility: hidden; }
+  </style>
+  <!-- Environment injection for Option A -->
+  <script>
+    // Your Deriv application ID (Option A)
+    // Change DERIV_ENV to "demo" if you want to label/demo-test.
+    window.DERIV_APP_ID = 102880;
+    window.DERIV_ENV = "prod";
+  </script>
+  <!-- Supabase JS v2 (add crossorigin so errors aren't masked as "Script error.") -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
+  <script>
+    // Surface runtime errors to the Activity Log with smarter filtering
+    (function () {
+      let lastGenericScriptErrorTs = 0;
+      let corsHintLogged = false;
+      window.addEventListener('error', function (e) {
+        try {
+          const el = document.getElementById('results');
+          const isResource = e && e.target && e.target !== window && e.target.tagName;
+          if (isResource) {
+            // Resource load error (e.g., img/script link)
+            const t = e.target;
+            const src = t && (t.src || t.href || t.currentSrc || t.baseURI || '(unknown)');
+            const line = `[${new Date().toLocaleTimeString()}] Resource error: ${t.tagName} failed to load ${src}`;
+            if (el) { const d = document.createElement('div'); d.className = 'log loss'; d.textContent = line; el.prepend(d); }
+            console.error('Resource load error', { tag: t?.tagName, src });
+            return;
+          }
+
+          const corsMasked = (e && e.message === 'Script error.' && (!e.filename || e.lineno === 0));
+          if (corsMasked) {
+            // Throttle duplicate, non-actionable messages
+            const now = Date.now();
+            if (now - lastGenericScriptErrorTs < 4000) return;
+            lastGenericScriptErrorTs = now;
+            if (!corsHintLogged) {
+              const hint = `[${new Date().toLocaleTimeString()}] Runtime error: Cross-origin script threw (details masked). Ensure CDN scripts use crossorigin=\"anonymous\" and CSP allows them.`;
+              if (el) { const d = document.createElement('div'); d.className = 'log loss'; d.textContent = hint; el.prepend(d); }
+              console.warn('Generic Script error — likely cross-origin; enable crossorigin and check CSP', e);
+              corsHintLogged = true;
+            }
+            return;
+          }
+
+          const stack = e && e.error && e.error.stack ? `\n${e.error.stack}` : '';
+          const msg = `[${new Date().toLocaleTimeString()}] Runtime error: ${e.message} @ ${e.filename}:${e.lineno}`;
+          if (el) { const d = document.createElement('div'); d.className = 'log loss'; d.textContent = msg; el.prepend(d); }
+          console.error('Runtime error', e, stack);
+        } catch {}
+      }, true);
+    })();
+    window.addEventListener('unhandledrejection', function (e) {
+      try {
+        const el = document.getElementById('results');
+        const reason = (e && e.reason) ? (e.reason.message || e.reason) : 'unknown';
+        const stack = (e && e.reason && e.reason.stack) ? `\n${e.reason.stack}` : '';
+        const msg = `[${new Date().toLocaleTimeString()}] Unhandled rejection: ${reason}`;
+        if (el) { const d = document.createElement('div'); d.className = 'log loss'; d.textContent = msg; el.prepend(d); }
+        console.error('Unhandled rejection', e, stack);
+      } catch {}
+    });
+  </script>
+</head>
+<body class="compact preauth-hide">
+  <div class="app two-col">
+    <header class="app-header">
+      <div class="brand">
+        <h1>Quantix Pro Trading AI</h1>
+        <p class="tagline">Digits + Bolt • Manual / Auto • Live Analytics</p>
+      </div>
+      <div class="header-actions" style="display:flex;gap:10px;align-items:center;">
+        <button id="connectBtn" class="btn primary">Connect</button>
+        <!-- Small logout button -->
+        <button id="logoutBtn" class="btn ghost" title="Sign out">Logout</button>
+      </div>
+    </header>
+
+    <!-- LEFT COLUMN -->
+    <div class="col-left">
+      <!-- Connection -->
+      <section class="panel panel-connect tight-stack">
+        <h2>Connection</h2>
+        <div class="row wrap">
+          <label for="token" class="lbl">Deriv API Token</label>
+          <input id="token" type="password" class="input token" placeholder="Paste your Deriv API token…" />
+        </div>
+        <div class="row status-row wrap mt-8">
+          <div class="status-badge">
+            <span class="status-label">Account:</span>
+            <span id="accountType" class="status-value">—</span>
+          </div>
+          <div class="status-badge">
+            <span class="status-label">Balance:</span>
+            <span id="balance" class="status-value">$0.00</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session -->
+      <section id="panelSession" class="panel panel-session tight-stack">
+        <h2>Time & Session Recommendation</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">ET Time</div>
+            <div id="etTime" class="stat-value">—</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Session</div>
+            <div id="sessionName" class="stat-value">—</div>
+            <small id="sessionNote" class="hint"></small>
+          </div>
+            <div class="stat">
+              <div class="stat-label">Best Strategy</div>
+              <div id="bestStrategy" class="stat-value">—</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Recommendation</div>
+              <div id="tradeRecommendation" class="stat-value badge rec-neutral">—</div>
+            </div>
+        </div>
+        <div class="mt-8">
+          <div class="hint" id="sessionReason">Collecting data…</div>
+        </div>
+      </section>
+
+      <!-- Advanced Controls -->
+      <section class="panel panel-controls tight-stack">
+        <h2>Advanced Controls</h2>
+        <div class="grid two-col">
+          <div class="control-group">
+            <label for="confThreshold" class="lbl">Confidence Threshold (%)</label>
+            <input id="confThreshold" type="number" min="50" max="100" step="1" value="85" class="input" />
+          </div>
+          <div class="control-group">
+            <label for="maxLossStreak" class="lbl">Max Loss Streak Stop</label>
+            <input id="maxLossStreak" type="number" min="1" step="1" value="3" class="input" />
+          </div>
+        </div>
+      </section>
+
+      <!-- Strategies -->
+      <section class="panel panel-strategies compact-strategies tight-stack">
+        <h2>Strategies</h2>
+        <div class="grid strategies-grid">
+          <div class="strategy-item">
+            <div class="strategy-row">
+              <div class="strategy-title">Bolt (ACCU)</div>
+              <label class="toggle-switch sm">
+                <input id="toggleAccumulator" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <p class="hint">Multi-horizon trend & regime composite.</p>
+          </div>
+          <div class="strategy-item">
+            <div class="strategy-row">
+              <div class="strategy-title">Z Trade (Differs vs Last)</div>
+              <label class="toggle-switch sm">
+                <input id="toggleDiffersVsLast" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <p class="hint">Bayesian multi-window stickiness model.</p>
+          </div>
+          <div class="strategy-item">
+            <div class="strategy-row">
+              <div class="strategy-title">Flip X (Even/Odd)</div>
+              <label class="toggle-switch sm">
+                <input id="toggleEvenOdd" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <p class="hint">Markov parity + bias & run adaptation.</p>
+          </div>
+          <div class="strategy-item">
+            <div class="strategy-row">
+              <div class="strategy-title">Strike Pro (Over/Under + Rise/Fall)</div>
+              <label class="toggle-switch sm">
+                <input id="toggleStrikePro" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <p class="hint">Predicts Over 1 vs Under 9 with direction synergy.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Performance -->
+      <section class="panel panel-stats tight-stack">
+        <h2>Performance</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Total Trades</div>
+            <div id="totalTrades" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Wins</div>
+            <div id="wins" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Losses</div>
+            <div id="losses" class="stat-value">0</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Winrate</div>
+            <div id="winRate" class="stat-value">0%</div>
+          </div>
+        </div>
+        <div class="row mt-8">
+          <button id="clearHistoryBtn" class="btn danger">Clear Trade History</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div class="col-right">
+
+      <!-- Signal & Confidence -->
+      <section class="panel panel-confidence">
+        <h2>Signal & Confidence</h2>
+        <div class="signal-row">
+          <div id="tradeSignal" class="signal-badge">Avoid Trading</div>
+          <div class="confidence-wrap">
+            <div class="confidence-bar">
+              <div id="confidenceFill" class="confidence-fill" style="width:0%"></div>
+            </div>
+            <div class="confidence-meta">
+              <span id="confidencePct">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Strategy Metrics -->
+      <section id="panelFibo" class="panel panel-fibo">
+        <div class="fibo-header">
+          <div>
+            <h2>Strategy Metrics</h2>
+            <small class="hint" id="fiboSubtitle">Live Analysis</small>
+          </div>
+        </div>
+        <div class="fibo-top">
+          <div class="fibo-kpi">
+            <div class="kpi-label">Current Price</div>
+            <div id="fiboPrice" class="kpi-value">—</div>
+          </div>
+          <div class="fibo-kpi">
+            <div class="kpi-label">Current Digit</div>
+            <div id="fiboDigit" class="kpi-value">—</div>
+          </div>
+            <div class="fibo-kpi">
+              <div class="kpi-label">Price Change</div>
+              <div id="fiboDelta" class="kpi-value delta neutral">—</div>
+            </div>
+            <div class="fibo-kpi">
+              <div class="kpi-label">Market Trend</div>
+              <div id="marketTrend" class="kpi-value">—</div>
+            </div>
+            <div class="fibo-kpi">
+              <div class="kpi-label">Previous Digit</div>
+              <div id="fiboPrevDigit" class="kpi-value">—</div>
+            </div>
+            <div class="fibo-kpi fibo-kpi-streak hidden" id="fiboParityStreakCard">
+              <div class="kpi-label">Current Streak</div>
+              <div id="fiboParityStreak" class="kpi-value">—</div>
+            </div>
+        </div>
+        <div class="fibo-body">
+          <div id="fiboGaugeCard" class="fibo-card">
+            <div class="card-title" id="fiboGaugeTitle">Z Trade Probability Gauge</div>
+            <div class="gauge">
+              <div id="fiboGaugeFill" class="gauge-fill" style="width:0%"></div>
+            </div>
+            <div class="gauge-meta">
+              <div class="pct" id="fiboGaugePct">0%</div>
+              <div class="expected">Expected Outcome: <span id="fiboExpected" class="expected-value">—</span></div>
+            </div>
+            <div class="gauge-meta">
+              <div>Direction: <span id="fiboDirExpected" class="expected-value">—</span></div>
+            </div>
+          </div>
+          <div class="fibo-card">
+            <div class="card-title">Strategy Analysis</div>
+            <div class="analysis-grid">
+              <div>Confidence: <strong id="fiboConf">—</strong></div>
+              <div>Signal Strength: <strong id="fiboStrength" class="strength weak">WEAK</strong></div>
+            </div>
+            <div id="fiboReason" class="fibo-reason hint mt-8">Collecting data…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Even/Odd -->
+      <section id="panelEvenOdd" class="panel panel-even-odd hidden">
+        <h2>Even/Odd Distribution</h2>
+        <div class="eo-grid">
+          <div class="eo-left">
+            <div class="eo-bar-block">
+              <div class="eo-bar-label">Even Numbers</div>
+              <div class="eo-bar">
+                <div id="eoEvenFill" class="eo-fill even" style="width:0%"></div>
+              </div>
+              <div class="eo-bar-meta"><span id="eoEvenPct">0%</span><span id="eoEvenCount" class="hint">0 occurrences</span></div>
+            </div>
+            <div class="eo-bar-block">
+              <div class="eo-bar-label">Odd Numbers</div>
+              <div class="eo-bar">
+                <div id="eoOddFill" class="eo-fill odd" style="width:0%"></div>
+              </div>
+              <div class="eo-bar-meta"><span id="eoOddPct">0%</span><span id="eoOddCount" class="hint">0 occurrences</span></div>
+            </div>
+          </div>
+          <div class="eo-right eo-expected-card">
+            <div class="eo-expected-title">Expected Outcome</div>
+            <div class="eo-expected-next">Next Digit: <strong id="eoNext">—</strong></div>
+            <div>Confidence: <strong id="eoConf">0%</strong></div>
+            <div>Signal Strength: <strong id="eoStrength" class="strength weak">WEAK</strong></div>
+            <div id="eoReason" class="hint mt-8">Collecting data…</div>
+          </div>
+        </div>
+        <hr class="soft mt-12" />
+        <div class="insight-title mt-8">Individual Digit Distribution</div>
+        <div id="eoDigitsGrid" class="eo-digits-grid"></div>
+      </section>
+
+      <!-- Digits Insights -->
+      <section id="panelDigitsInsights" class="panel hidden">
+        <h2>Digits Insights</h2>
+        <div class="insights-grid-compact">
+          <div class="insight-card outcomes-card">
+            <div class="insight-title">Recent Outcomes (Last 10)</div>
+            <ul id="recentOutcomesList" class="outcomes-list"></ul>
+          </div>
+          <div class="insight-card">
+            <div class="insight-title">Trend Drift Indicator</div>
+            <div class="drift-row">
+              <div id="driftStatus" class="drift-status">—</div>
+              <div id="driftConsec" class="drift-sub">—</div>
+            </div>
+            <div class="drift-meta">
+              <div>Pattern: <span id="driftPattern" class="badge badge-outline">—</span></div>
+              <div>Drift Strength: <strong id="driftStrengthText">0.0%</strong></div>
+            </div>
+            <div class="drift-bar">
+              <div id="driftBarFill" class="drift-bar-fill" style="width:0%"></div>
+            </div>
+            <div id="driftWarn" class="drift-warn hidden">⚠️ Clustering Detected — be flexible and let the sequence unfold</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Safe Entry -->
+      <section class="panel panel-safe-entry" id="panelSafeEntry">
+        <h2 class="panel-title-inline"><span>Safe Entry Suggestion</span></h2>
+        <div class="safe-entry-card" id="safeEntryCard">
+          <div class="se-header">
+            <div class="se-head-left">
+              <div class="se-head-status" id="seStatusHeadline">
+                <span id="seStatusBadgeIcon" class="se-icon se-icon-spark"></span>
+                <span id="seStatusText">Collecting Data…</span>
+              </div>
+              <div class="se-head-sub" id="seHeadSub">Entry Timing Assessment</div>
+            </div>
+            <div class="se-head-right">
+              <div class="se-risk-label">
+                <span id="seRiskText">—</span>
+                <small class="se-risk-sub">Risk Level</small>
+              </div>
+            </div>
+          </div>
+          <div class="se-body">
+            <div class="se-mini-card" id="seActionCard">
+              <div class="se-mini-title">
+                <span class="se-mini-icon se-mini-icon-action"></span>
+                Suggested Action
+              </div>
+              <div id="safeAction" class="se-mini-content">Waiting for signal…</div>
+            </div>
+            <div class="se-mini-card" id="seReasonCard">
+              <div class="se-mini-title">
+                <span class="se-mini-icon se-mini-icon-analysis"></span>
+                Analysis Reasoning
+              </div>
+              <div id="safeAnalysis" class="se-mini-content">No data yet. Collecting outcomes…</div>
+            </div>
+          </div>
+          <div class="se-scale-block">
+            <div class="se-scale-labels">
+              <span>AVOID</span><span>WAIT</span><span>GOOD</span><span>EXCELLENT</span>
+            </div>
+            <div class="se-scale-bar">
+              <div class="se-scale-fill"></div>
+              <div class="se-scale-indicator" id="seScaleIndicator" style="left:0%;">
+                <span class="se-scale-indicator-dot"></span>
+                <span class="se-scale-indicator-value" id="seScaleIndicatorValue">0%</span>
+              </div>
+            </div>
+          </div>
+          <div class="se-bottom-banner" id="seBottomBanner">
+            <div class="se-bottom-icon" id="seBottomIcon">⭐</div>
+            <div class="se-bottom-text" id="seBottomText">Awaiting confirmation signals…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trading Panel -->
+      <section class="panel panel-trading hidden" id="panelTrading">
+        <div class="trading-header">
+          <h2 class="title">Trading Panel</h2>
+          <span id="activeStrategyLabel" class="badge strategy-badge">—</span>
+          <span id="nextTradeCountdown" class="hint" style="margin-left:auto;">Next trade in: —</span>
+        </div>
+
+        <div class="trade-grid">
+          <div class="control-group">
+            <label for="symbolSelect" class="lbl">Select Index</label>
+            <select id="symbolSelect" class="input select">
+              <option value="R_100">R_100</option>
+              <option value="R_75">R_75</option>
+              <option value="R_50">R_50</option>
+              <option value="R_25">R_25</option>
+              <option value="R_10">R_10</option>
+              <option value="BOOM1000">BOOM1000</option>
+              <option value="BOOM500">BOOM500</option>
+              <option value="BOOM300">BOOM300</option>
+              <option value="CRASH1000">CRASH1000</option>
+              <option value="CRASH500">CRASH500</option>
+              <option value="CRASH300">CRASH300</option>
+            </select>
+          </div>
+
+          <div class="control-group">
+            <label for="tradeTypeSelect" class="lbl">Trade Type</label>
+            <select id="tradeTypeSelect" class="input select">
+              <option value="" disabled selected>Select a strategy</option>
+            </select>
+          </div>
+
+          <div class="control-group">
+            <label for="stake" class="lbl">Stake Amount</label>
+            <input id="stake" type="number" min="0.35" step="0.01" value="1.00" class="input" />
+            <small class="hint">Minimum 0.35</small>
+          </div>
+
+          <div class="control-group">
+            <span class="lbl">Auto Trading</span>
+            <label class="toggle-switch">
+              <input id="autoTrade" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="control-group">
+            <label for="autoTradeCount" class="lbl">Auto Trades (1–10)</label>
+            <input id="autoTradeCount" type="number" min="1" max="10" step="1" value="1" class="input" />
+            <small class="hint">Number of trades to execute when Auto Trade is ON.</small>
+          </div>
+
+          <div class="control-group hidden" id="flipxDelayGroup">
+            <label for="flipxDelayTicks" class="lbl">Flip X Tick Delay (1–10)</label>
+            <input id="flipxDelayTicks" type="number" min="1" max="10" step="1" value="1" class="input" />
+            <small class="hint">Number of future ticks to wait before executing.</small>
+          </div>
+        </div>
+
+        <div class="trade-actions">
+          <div id="diffActions" class="action-row hidden">
+            <button id="diffBuy3Btn" class="btn btn-burst-3x">⚡ Buy 3x (Same Tick Z Trade)</button>
+            <button id="diffBuy3SeqBtn" class="btn btn-burst-3x-alt">▶ Buy 3x (Sequential • stop on 1 loss)</button>
+            <button id="diffBuy1Btn" class="btn btn-single">Buy 1 (Z Trade)</button>
+          </div>
+          <div id="evenOddActions" class="action-row hidden">
+            <button id="evenOddPlaceTradeBtn" class="btn btn-single">Place Trade (Predicted)</button>
+            <button id="evenOddPlaceEvenBtn" class="btn btn-even">Place EVEN</button>
+            <button id="evenOddPlaceOddBtn" class="btn btn-odd">Place ODD</button>
+          </div>
+          <div id="accuActions" class="action-row hidden">
+            <button id="buyAccuBtn" class="btn btn-accu">Place Bolt Trade</button>
+          </div>
+          <div id="strikeActions" class="action-row hidden">
+            <button id="strikePlaceTradeBtn" class="btn btn-single">Place Trade</button>
+            <button id="strikePlaceOverBtn" class="btn btn-even">Place Over 1</button>
+            <button id="strikePlaceUnderBtn" class="btn btn-odd">Place Under 9</button>
+            <button id="strikeBuy3OverBtn" class="btn btn-burst-3x">⚡ Buy 3x Over 1</button>
+            <button id="strikeBuy3UnderBtn" class="btn btn-burst-3x-alt">⚡ Buy 3x Under 9</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bolt Settings -->
+      <section id="panelAccuSettings" class="panel panel-controls hidden">
+        <h2>Bolt Settings</h2>
+        <div class="grid three-col">
+          <div class="control-group">
+            <label for="accuGrowth" class="lbl">Growth Rate (%)</label>
+            <input id="accuGrowth" type="number" min="1" max="5" step="0.1" value="1.0" class="input" />
+            <small class="hint">Range 1–5 (percent per tick).</small>
+          </div>
+          <div class="control-group">
+            <label for="accuTakeProfit" class="lbl">Auto Take Profit</label>
+            <input id="accuTakeProfit" type="number" min="0.10" step="0.01" value="0.50" class="input" />
+            <small class="hint">0 = off.</small>
+          </div>
+          <div class="control-group">
+            <label for="accuStopLoss" class="lbl">Auto Stop Loss</label>
+            <input id="accuStopLoss" type="number" min="0.00" step="0.01" value="0.00" class="input" />
+            <small class="hint">0 = off.</small>
+          </div>
+          <div class="control-group">
+            <label for="accuTickLimit" class="lbl">Tick Limit (1–85)</label>
+            <input id="accuTickLimit" type="number" min="1" max="85" step="1" value="20" class="input" />
+            <small class="hint">Auto-close limit (with Auto-close ON).</small>
+          </div>
+          <div class="control-group">
+            <span class="lbl">Auto-close Bolt</span>
+            <label class="toggle-switch">
+              <input id="accuAutoClose" type="checkbox" checked />
+              <span class="slider"></span>
+            </label>
+            <small class="hint">TP / SL / Tick Limit enforced.</small>
+          </div>
+        </div>
+        <div class="row status-row wrap mt-8">
+          <div class="status-badge">
+            <span class="status-label">Bolt:</span>
+            <span id="accuStatus" class="status-value">Closed</span>
+          </div>
+          <div class="status-badge">
+            <span class="status-label">Running P/L:</span>
+            <span id="accuRunningPL" class="status-value">$0.00</span>
+          </div>
+          <div class="status-badge">
+            <span class="status-label">Growth:</span>
+            <span id="accuGrowthLive" class="status-value">—</span>
+          </div>
+          <div class="status-badge">
+            <span class="status-label">Ticks:</span>
+            <span id="accuTicksElapsed" class="status-value">0 / 20</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Market Conditions (Bolt) -->
+      <section id="panelAccuMarket" class="panel hidden">
+        <h2>Market Conditions (Bolt)</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Consistency Level</div>
+            <div id="accuConsistency" class="stat-value">—</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Volatility Level</div>
+            <div id="accuVolLevel" class="stat-value">—</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tick Movement -->
+      <section id="panelTickMovement" class="panel panel-tick-movement hidden">
+        <h2>Recent Tick Movement (Last 20)</h2>
+        <div class="tick-legend">
+          <span class="pill">Up = Green • Down = Red</span>
+          <span class="pill">Even = Green • Odd = Red</span>
+          <span class="pill">Boom: baseline ↓, spikes ↑</span>
+          <span class="pill">Crash: baseline ↑, spikes ↓</span>
+        </div>
+        <div id="tickMovement" class="tick-movement"></div>
+      </section>
+
+      <!-- Equity / Profit -->
+      <section class="panel panel-pl">
+        <h2>Equity / Profit</h2>
+        <div class="pl-top">
+          <div class="net-profit">
+            <span class="label">Net Profit:</span>
+            <span id="netProfit" class="value">$0.00</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Activity Log -->
+      <section class="panel panel-logs">
+        <h2>Activity Log</h2>
+        <div id="results" class="log-stream"></div>
+      </section>
+    </div>
+
+    <footer class="app-footer">
+      <p>&copy; 2025 Quantix Pro Trading AI • Educational use only. Trading involves risk.</p>
+    </footer>
+  </div>
+
+  <!-- Supabase auth gate + logout wiring (runs before app script) -->
+  <script>
+    const SUPABASE_URL = "https://mepimmfrpklmmpctsuzr.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lcGltbWZycGtsbW1wY3RzdXpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgyMzY2NjcsImV4cCI6MjA3MzgxMjY2N30.6p2qbSDdv22hJVaSUE-rwRAgrFE1Cj44Lp2ezBxFOHQ";
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    (async function authGate() {
+      // If no active session, send to login page (keep dashboard hidden)
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) {
+        window.location.href = "login.html";
+        return;
+      }
+      // Authenticated — reveal dashboard now
+      document.body.classList.remove("preauth-hide");
+      // Listen for sign-out in other tabs or token expiry
+      sb.auth.onAuthStateChange((_event, sess) => {
+        if (!sess) window.location.href = "login.html";
+      });
+    })();
+
+    // Logout button
+    document.getElementById("logoutBtn")?.addEventListener("click", async () => {
+      try { await sb.auth.signOut(); } catch {}
+      window.location.href = "login.html";
+    });
+  </script>
+
+  <script src="script.js"></script>
+</body>
+</html>

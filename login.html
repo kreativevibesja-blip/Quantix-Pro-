@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Quantix Pro — Login</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Supabase JS v2 (add crossorigin so errors aren't masked) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
+  <style>
+    /* Minimal layout to center the login panel using your existing design tokens */
+    .login-wrap { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+    .login-panel { width: 100%; max-width: 420px; }
+    .form-msg { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 16px; white-space: pre-wrap; }
+    .link { color: var(--accent); cursor: pointer; font-weight: 700; }
+    .disclaimer { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.4; }
+  </style>
+</head>
+<body class="compact">
+  <div class="login-wrap">
+    <section class="panel login-panel">
+      <h2>Sign in</h2>
+      <div class="mt-2 hint">Use the credentials provided for your account.</div>
+
+      <div id="authForms" class="mt-4">
+        <!-- Login form only (no reset password) -->
+        <div id="loginForm">
+          <div class="control-group">
+            <label class="lbl" for="loginEmail">Email</label>
+            <input id="loginEmail" class="input" type="email" placeholder="you@example.com" autocomplete="username" />
+          </div>
+          <div class="control-group">
+            <label class="lbl" for="loginPassword">Password</label>
+            <input id="loginPassword" class="input" type="password" placeholder="••••••••" autocomplete="current-password" />
+          </div>
+
+          <div class="control-group" style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;">
+            <input id="agreeTerms" type="checkbox" style="margin-top:4px;" />
+            <label class="lbl" for="agreeTerms" style="font-weight:400;cursor:pointer;">
+              I acknowledge and agree to the terms and conditions of Quantix Pro.
+            </label>
+          </div>
+
+          <div class="row mt-2" style="justify-content:flex-end;">
+            <button id="loginBtn" class="btn primary" disabled>Sign in</button>
+          </div>
+
+          <div class="disclaimer">
+            ⚠️ Trading involves significant risk and may not be suitable for everyone. Please ensure that you understand the risks involved.
+          </div>
+
+          <div id="loginMsg" class="form-msg mt-2"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Supabase client
+    const SUPABASE_URL = "https://mepimmfrpklmmpctsuzr.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lcGltbWZycGtsbW1wY3RzdXpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgyMzY2NjcsImV4cCI6MjA3MzgxMjY2N30.6p2qbSDdv22hJVaSUE-rwRAgrFE1Cj44Lp2ezBxFOHQ";
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Elements
+    const $ = (id) => document.getElementById(id);
+    const loginBtn = $("loginBtn");
+    const loginEmail = $("loginEmail");
+    const loginPassword = $("loginPassword");
+    const loginMsg = $("loginMsg");
+    const agreeTerms = $("agreeTerms");
+
+    function setMsg(el, text, good=false){
+      if(!el) return;
+      el.textContent = text || "";
+      el.style.color = good ? "var(--good)" : "var(--muted)";
+    }
+
+    // Enable/disable Sign in based on Terms checkbox
+    agreeTerms?.addEventListener("change", () => {
+      loginBtn.disabled = !agreeTerms.checked;
+      if (!agreeTerms.checked) setMsg(loginMsg, "Please acknowledge and agree to the terms and conditions to proceed.");
+      else setMsg(loginMsg, "");
+    });
+
+    // Submit on Enter (still validates terms)
+    [loginEmail, loginPassword].forEach(inp => inp?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loginBtn?.click();
+    }));
+
+    // Sign in
+    loginBtn?.addEventListener("click", async () => {
+      const email = (loginEmail.value || "").trim();
+      const password = loginPassword.value || "";
+
+      if (!agreeTerms.checked) {
+        setMsg(loginMsg, "Please acknowledge and agree to the terms and conditions to proceed.");
+        return;
+      }
+      if (!email || !password) {
+        setMsg(loginMsg, "Please enter email and password.");
+        return;
+      }
+
+      setMsg(loginMsg, "Signing in…");
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) { setMsg(loginMsg, error.message || "Login failed."); return; }
+
+      setMsg(loginMsg, "Success! Redirecting…", true);
+      window.location.href = "index.html";
+    });
+
+    // If already signed in, go to app
+    (async function init() {
+      const { data: { session } } = await sb.auth.getSession();
+      if (session) {
+        window.location.href = "index.html";
+      }
+    })();
+  </script>
+</body>
+</html>

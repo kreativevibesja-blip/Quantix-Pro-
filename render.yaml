@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: quantix-pro
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DERIV_APP_ID
+        sync: false
+    autoDeploy: true
