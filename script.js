@@ -3313,6 +3313,15 @@
 
   function init() {
     loadSettings();
+    // Ensure panels remain hidden until a strategy is toggled ON (ignore persisted strategy toggles)
+    useAccumulator = false;
+    useDiffersVsLast = false;
+    useEvenOdd = false;
+    useStrikePro = false;
+    if (toggleAccumulator) toggleAccumulator.checked = false;
+    if (toggleDiffersVsLast) toggleDiffersVsLast.checked = false;
+    if (toggleEvenOdd) toggleEvenOdd.checked = false;
+    if (toggleStrikePro) toggleStrikePro.checked = false;
     updateStatsUI();
     updateProfitUI();
     drawProfitChart();
@@ -3320,10 +3329,13 @@
     clearAccountTypeUI();
     updateEtClock();
     setInterval(updateEtClock, 1000);
-    updatePanelVisibility();
+  updatePanelVisibility();
+  saveSettings();
 
     // Start public market feed so Strategy Metrics/Tick Movement update before connect
     openPublicFeedIfNeeded();
+  // Ensure a subscription to the current symbol is active on the public feed
+  try { setActiveSymbol(activeSymbol); } catch {}
 
     if (tickMovementEl) {
       tickMovementEl.style.justifyContent = "flex-end";
