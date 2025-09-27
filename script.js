@@ -353,6 +353,8 @@
   let pendingBuy = null; // {type, barrier, qty}
   let lastBuyContext = null; // {type,barrier,qty,retried}
   let lastTickEpoch = 0;
+  // De-duplication key for incoming ticks (epoch+price)
+  let lastTickKey = null;
 
   // Proposals caches and in-flight guards
   const proposalCache = new Map(); // DIGITDIFF: barrier => {id, ts, stake, ask}
@@ -1421,6 +1423,13 @@
     const price = Number(quote);
     if (Number.isNaN(price)) return;
 
+    // Ignore duplicate tick deliveries (e.g., if an event is emitted twice by transport)
+    if (epoch != null) {
+      const key = `${epoch}-${price}`;
+      if (key === lastTickKey) return;
+      lastTickKey = key;
+    }
+
     priceHistory.push(price);
     if (priceHistory.length > CONFIG.PRICE_HISTORY_LIMIT) priceHistory.shift();
 
@@ -2321,9 +2330,6 @@
           const url = (API_BASE || '') + `/api/events?sessionId=${encodeURIComponent(sessionId)}`;
           eventSource = new EventSource(url);
           eventSource.onopen = () => { log('SSE connected. Waiting for authorize…'); };
-          eventSource.onmessage = (ev) => {
-            try { const data = JSON.parse(ev.data); handleBackendEvent(data); } catch {}
-          };
           // Named events keyed by msg_type
           ['authorize','balance','history','tick','proposal','proposal_open_contract','buy','sell','deriv'].forEach((t)=>{
             eventSource.addEventListener(t, (ev)=>{ try { const d = JSON.parse(ev.data); handleBackendEvent(d); } catch {} });
