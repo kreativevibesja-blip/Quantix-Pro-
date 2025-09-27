@@ -350,6 +350,10 @@
   let trendAgeTicks = 0, prevTrendState = null;
   let stableTrend = "RANGING", trendCandidate = "RANGING", trendCandidateAge = 0;
 
+  // Derived 2dp display state to keep price and digit perfectly aligned in UI
+  let lastPrice2dpStr = null; // e.g., "5853.39"
+  let lastDigit2dp = null;    // e.g., 9 (hundredths place)
+
   // Trading flow
   let ticksSinceLastTrade = 9999;
   let placingTrade = false;
@@ -452,6 +456,27 @@
     const digits = (str || "").replace(/\D/g, "");
     if (!digits) return null;
     return Number(digits[digits.length - 1]);
+  }
+  // Safer 2dp derivation using display strings to avoid floating-point drifts
+  function trunc2dpFromString(str) {
+    const raw = String(str ?? '').trim();
+    const neg = raw.startsWith('-');
+    const t = raw.replace(/[^0-9.\-]/g, '');
+    const parts = t.split('.');
+    let intp = parts[0] || '0';
+    let frac = (parts[1] || '').slice(0, 2);
+    if (frac.length === 0) frac = '00';
+    else if (frac.length === 1) frac += '0';
+    const outStr = `${neg && intp !== '0' ? '-' : ''}${intp}.${frac}`;
+    const outNum = Number(`${neg ? '-' : ''}${intp}.${frac}`);
+    const lastDigit = Number(frac[1]);
+    return { outNum, outStr, lastDigit };
+  }
+  function derive2dp(quote, displayValue) {
+    if (displayValue != null) return trunc2dpFromString(displayValue);
+    const n = Number(quote);
+    const s = to2dpTrunc(n).toFixed(2);
+    return { outNum: Number(s), outStr: s, lastDigit: Number(s[s.length - 1]) };
   }
   function log(msg, cls = "") {
     if (!resultsEl) {
@@ -904,6 +929,19 @@
     let confidence = clamp(Math.round((Math.max(0, differsProb - 50) / 50) * 100), 0, 98);
     const drift = computeDriftMetrics();
     if (drift.pattern === 'CLUSTERING' && drift.strength >= 60 && lastOutcome === 'M') confidence = Math.max(0, confidence - 10);
+    // Synergy bumps: alternating drift or ranging trend with decent separation
+    if ((drift.pattern === 'ALTERNATING' && drift.strength >= 50) || (stableTrend === 'RANGING' && differsProb >= 58)) {
+      confidence = Math.min(98, confidence + 3);
+    }
+
+    // Synergy boosts to increase high-quality signals
+    let synergy = false;
+    if (drift.pattern === 'ALTERNATING' && drift.strength >= 50) {
+      confidence = Math.min(98, confidence + 5); synergy = true;
+    }
+    if (stableTrend === 'RANGING') {
+      confidence = Math.min(98, confidence + 2); // digits tend to be more balanced in ranging
+    }
 
     const goodTrade = (confidence >= 90) && (differsProb >= 60) && !(drift.pattern === 'CLUSTERING' && drift.strength >= 75);
 
@@ -911,11 +949,12 @@
       confidence,
       tradeType: 'DIGITDIFF',
       barrier: String(lastDigit),
-      reason: `Differs≈${differsProb.toFixed(1)}% | Run=${runLen}${lastOutcome} | Drift=${drift.pattern}/${drift.strength}%`,
+      reason: `Differs≈${differsProb.toFixed(1)}% | Run=${runLen}${lastOutcome} | Drift=${drift.pattern}/${drift.strength}%${synergy ? ' • Synergy' : ''}`,
       stickyPct,
       differsProb,
       runLen,
-      goodTrade
+      goodTrade,
+      synergy
     };
   }
 
@@ -969,7 +1008,9 @@
     if (stableTrend === 'RANGING' && emaVol < 55) confidence = Math.max(0, confidence - 5);
     if (stableTrend === 'UP' || stableTrend === 'DOWN') confidence = Math.min(98, confidence + 2);
 
-    const goodTrade = (emaConsistency >= 90) && (emaVol >= 60) && coherence === 1 && confidence >= 90 && trendAge >= 6 && stableTrend !== 'RANGING';
+  // Synergy: strong coherent trend + solid volatility
+  if (coherence === 1 && emaVol >= 65 && emaConsistency >= 92) confidence = Math.min(98, confidence + 3);
+  const goodTrade = (emaConsistency >= 90) && (emaVol >= 60) && coherence === 1 && confidence >= 90 && trendAge >= 6 && stableTrend !== 'RANGING';
 
     return { confidence, reason: `Trend=${emaConsistency.toFixed(1)}% Vol=${emaVol.toFixed(0)}% Coherent=${coherence} Mom=${boundedMomentum.toFixed(2)} Age=${trendAge}`, consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade };
   }
@@ -1002,15 +1043,32 @@
     const parity = (pO > pE) ? 'ODD' : 'EVEN';
     const dominant = parity === 'EVEN' ? pE : pO;
 
-    // Confidence from separation from 50%
-    let confidence = clamp(Math.round((Math.max(0, dominant - 0.5) / 0.5) * 100), 0, 98);
+  // Confidence from separation from 50%
+  let confidence = clamp(Math.round((Math.max(0, dominant - 0.5) / 0.5) * 100), 0, 98);
     const evidenceStrength = paritySeq.length;
     if (evidenceStrength < 10) confidence = Math.min(confidence, 78);
 
-    const goodTrade = (confidence >= 88) && (evidenceStrength >= 20) && (dominant >= 0.58);
-    const reason = `Parity=${parity} (${(dominant * 100).toFixed(1)}%) | Streak=${lastRun} ${lastParityRaw === 'E' ? 'EVEN' : 'ODD'} | Dist E=${evenPct.toFixed(1)}% O=${oddPct.toFixed(1)}% | N=${evidenceStrength}`;
+  // Synergy: stronger dominance, concentrated digits, and ranging trend
+  let synergy = false;
+  if (dominant >= 0.6) { confidence = Math.min(98, confidence + 3); synergy = true; }
+  const maxDigitPct = Math.max(...digitCounts.map(c => c / Math.max(1, paritySeq.length)));
+  if (maxDigitPct >= 0.25) { confidence = Math.min(98, confidence + 2); synergy = true; }
+  if (stableTrend === 'RANGING') { confidence = Math.min(98, confidence + 2); synergy = true; }
+  // EMA coherence + moderate volatility can support parity continuation
+  if (emaFastPrice != null && emaSlowPrice != null && prevEmaFast != null && prevEmaSlow != null) {
+    const slopeFast = emaFastPrice - prevEmaFast; const slopeSlow = emaSlowPrice - prevEmaSlow;
+    const coherent = Math.sign(slopeFast) === Math.sign(slopeSlow);
+    const deltas = []; for (let i = 1; i < priceHistory.length; i++) deltas.push(priceHistory[i] - priceHistory[i - 1]);
+    const recent = deltas.slice(-20); const avgAbs = recent.reduce((a,b)=>a+Math.abs(b),0)/Math.max(1,recent.length);
+    const medAbs = median(deltas.map(Math.abs)) || 1e-6;
+    const volModerate = Math.abs(avgAbs - medAbs) <= medAbs * 1.5;
+    if (coherent && volModerate && dominant >= 0.55) { confidence = Math.min(98, confidence + 2); synergy = true; }
+  }
 
-    return { confidence, tradeType: 'EVENODD', parity, reason, evenPct, oddPct, evenCount, oddCount, digitCounts, goodTrade, lastRun, lastParity: lastParityRaw === 'E' ? 'EVEN' : 'ODD', evidenceStrength };
+    const goodTrade = (confidence >= 88) && (evidenceStrength >= 20) && (dominant >= 0.58);
+    const reason = `Parity=${parity} (${(dominant * 100).toFixed(1)}%) | Streak=${lastRun} ${lastParityRaw === 'E' ? 'EVEN' : 'ODD'} | Dist E=${evenPct.toFixed(1)}% O=${oddPct.toFixed(1)}% | N=${evidenceStrength}${synergy ? ' • Synergy' : ''}`;
+
+    return { confidence, tradeType: 'EVENODD', parity, reason, evenPct, oddPct, evenCount, oddCount, digitCounts, goodTrade, lastRun, lastParity: lastParityRaw === 'E' ? 'EVEN' : 'ODD', evidenceStrength, synergy };
   }
 
   // Strike Pro evaluation
@@ -1047,15 +1105,15 @@
     let conf = 0.6 * ((ouProb - 0.5) / 0.5 * 100) + 0.4 * (dirConf * 100);
     conf = clamp(conf, 0, 98);
 
-    const synergy = (dir === 'RISE' && outcome === 'OVER1') || (dir === 'FALL' && outcome === 'UNDER9');
-    if (synergy) conf = Math.min(98, conf + 5);
+  const synergy = (dir === 'RISE' && outcome === 'OVER1') || (dir === 'FALL' && outcome === 'UNDER9');
+  if (synergy) conf = Math.min(98, conf + 5);
 
     const drift = computeDriftMetrics();
     if (drift.pattern === 'CLUSTERING' && drift.strength >= 70) conf = Math.max(0, conf - 6);
 
     // Trend nudges
-    if (outcome === 'OVER1') { if (stableTrend === 'UP') conf = Math.min(98, conf + 2); if (stableTrend === 'DOWN') conf = Math.max(0, conf - 4); }
-    else { if (stableTrend === 'DOWN') conf = Math.min(98, conf + 2); if (stableTrend === 'UP') conf = Math.max(0, conf - 4); }
+  if (outcome === 'OVER1') { if (stableTrend === 'UP') conf = Math.min(98, conf + 3); if (stableTrend === 'DOWN') conf = Math.max(0, conf - 4); }
+  else { if (stableTrend === 'DOWN') conf = Math.min(98, conf + 3); if (stableTrend === 'UP') conf = Math.max(0, conf - 4); }
 
     const ouProbPct = ouProb * 100;
     const dirConfPct = dirConf * 100;
@@ -1418,8 +1476,12 @@
 
   const rawPrice = Number(quote);
   if (Number.isNaN(rawPrice)) return;
-  // Truncate to 2 decimals for all analyses and UI
-  const price = to2dpTrunc(rawPrice);
+  // Derive consistent 2dp price + current digit using display string when available
+  const d2 = derive2dp(rawPrice, displayValue);
+  const price = d2.outNum;
+  // Save for UI so Strategy Metrics price and digit are always aligned
+  lastPrice2dpStr = d2.outStr;
+  lastDigit2dp = d2.lastDigit;
 
     // Ignore duplicate tick deliveries (e.g., if an event is emitted twice by transport)
     if (epoch != null) {
@@ -1460,8 +1522,8 @@
     // Maintain a stable market trend with hysteresis
     updateStableMarketTrend();
 
-  // Extract last digit from the hundredths place (2dp truncated)
-  let lastDigit = Number.isFinite(price) ? lastDigitFrom2dp(price) : null;
+  // Extract last digit from the hundredths place (2dp via display-derived string)
+  let lastDigit = Number.isFinite(price) ? d2.lastDigit : null;
     const prevDigit = digitHistory[digitHistory.length - 1];
     if (Number.isInteger(lastDigit)) {
       digitHistory.push(lastDigit);
@@ -1766,9 +1828,9 @@
     const lastPrice = priceHistory[priceHistory.length - 1];
     const prevPrice = priceHistory[priceHistory.length - 2];
 
-  if (fiboPriceEl) fiboPriceEl.textContent = Number.isFinite(lastPrice) ? fmt2(lastPrice) : "—";
+    if (fiboPriceEl) fiboPriceEl.textContent = (lastPrice2dpStr != null) ? lastPrice2dpStr : (Number.isFinite(lastPrice) ? fmt2(lastPrice) : "—");
 
-    const ld = digitHistory[digitHistory.length - 1];
+    const ld = (lastDigit2dp != null) ? lastDigit2dp : digitHistory[digitHistory.length - 1];
     const pd = digitHistory.length >= 2 ? digitHistory[digitHistory.length - 2] : null;
 
     if (fiboDigitEl) fiboDigitEl.textContent = ld != null ? String(ld) : "—";
@@ -1776,8 +1838,8 @@
 
     if (fiboDeltaEl) {
       if (Number.isFinite(lastPrice) && Number.isFinite(prevPrice)) {
-  const d = lastPrice - prevPrice;
-  fiboDeltaEl.textContent = `${d >= 0 ? "+" : ""}${fmt2(d)}`;
+        const d = lastPrice - prevPrice;
+        fiboDeltaEl.textContent = `${d >= 0 ? "+" : ""}${fmt2(d)}`;
         fiboDeltaEl.className = `kpi-value delta ${d > 0 ? "pos" : d < 0 ? "neg" : "neutral"}`;
       } else {
         fiboDeltaEl.textContent = "—"; fiboDeltaEl.className = "kpi-value delta neutral";
