@@ -1604,19 +1604,21 @@
     updateDigitsPanelsIfEnabled();
     if (useAccumulator) updateAccuConditions(accuEval.consistencyPct, accuEval.volLevelPct);
 
-  // Confidence bar and Safe Entry — pick the best among ALL strategies (suggestions)
+    // Confidence bar and Safe Entry — use ONLY the toggled-on strategy
     let activeEvalForSafe = null;
-    let activeConfidence = 0, activeSource = "None";
-    const candidates = [];
-  if (accuEval && (accuEval.confidence || 0) > 0) candidates.push({ name: "Bolt", ev: accuEval, conf: accuEval.confidence });
-  if (diffEval && (diffEval.confidence || 0) > 0) candidates.push({ name: "Z Trade", ev: diffEval, conf: diffEval.confidence + (diffEval.goodTrade ? 3 : 0) });
-  if (eoEval && (eoEval.confidence || 0) > 0) candidates.push({ name: "Flip X", ev: eoEval, conf: eoEval.confidence + (eoEval.goodTrade ? 2 : 0) });
-  if (strikeEval && (strikeEval.confidence || 0) > 0) candidates.push({ name: "Strike Pro", ev: strikeEval, conf: strikeEval.confidence + (strikeEval.goodTrade ? 4 : 0) });
-    if (candidates.length) {
-      candidates.sort((a,b)=> b.conf - a.conf);
-      activeEvalForSafe = candidates[0].ev;
-      activeConfidence = activeEvalForSafe.confidence;
-      activeSource = candidates[0].name;
+    let activeConfidence = 0;
+    let activeSource = "None";
+
+    if (useDiffersVsLast) {
+      activeEvalForSafe = diffEval; activeConfidence = diffEval?.confidence || 0; activeSource = "Z Trade";
+    } else if (useAccumulator) {
+      activeEvalForSafe = accuEval; activeConfidence = accuEval?.confidence || 0; activeSource = "Bolt";
+    } else if (useEvenOdd) {
+      activeEvalForSafe = eoEval; activeConfidence = eoEval?.confidence || 0; activeSource = "Flip X";
+    } else if (useStrikePro) {
+      activeEvalForSafe = strikeEval; activeConfidence = strikeEval?.confidence || 0; activeSource = "Strike Pro";
+    } else {
+      activeEvalForSafe = null; activeConfidence = 0; activeSource = "None";
     }
 
     setConfidenceBar(activeConfidence, activeSource);
