@@ -541,6 +541,10 @@
     const s = to2dpTrunc(n).toFixed(2);
     return { outNum: Number(s), outStr: s, lastDigit: Number(s[s.length - 1]) };
   }
+  // Local time stamp for Activity Log
+  function nowLocal() {
+    try { return new Date().toLocaleTimeString(); } catch { return String(new Date()).split(' ')[4] || ''; }
+  }
   function log(msg, cls = "") {
     const SUPPRESS_TRADE_LOGS = true;
     const shouldSuppress = (m) => {
