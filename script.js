@@ -2287,6 +2287,13 @@
       // Create/authorize session on backend
       (async () => {
         try {
+          // Quick health check to surface backend reachability issues early
+          try {
+            await backendFetch('/api/health', { method: 'GET' });
+          } catch (h) {
+            log(`Backend health check failed: ${h.message || h}`, 'loss');
+            return;
+          }
           sessionId = newSessionId();
           let appIdSend = null;
           try {
@@ -2294,6 +2301,7 @@
             appIdSend = Number(u.searchParams.get('app_id')) || null;
           } catch {}
           await backendFetch('/api/session', { method: 'POST', body: JSON.stringify({ sessionId, token, appId: appIdSend }) });
+          log('Backend session created. Opening SSE events…');
         } catch (e) {
           const code = e && e.status;
           if (code === 401) {
@@ -2312,6 +2320,7 @@
           if (eventSource) { try { eventSource.close(); } catch {} eventSource = null; }
           const url = (API_BASE || '') + `/api/events?sessionId=${encodeURIComponent(sessionId)}`;
           eventSource = new EventSource(url);
+          eventSource.onopen = () => { log('SSE connected. Waiting for authorize…'); };
           eventSource.onmessage = (ev) => {
             try { const data = JSON.parse(ev.data); handleBackendEvent(data); } catch {}
           };
@@ -2319,6 +2328,13 @@
           ['authorize','balance','history','tick','proposal','proposal_open_contract','buy','sell','deriv'].forEach((t)=>{
             eventSource.addEventListener(t, (ev)=>{ try { const d = JSON.parse(ev.data); handleBackendEvent(d); } catch {} });
           });
+          eventSource.onerror = (err) => { log('SSE connection error (events): see console for details', 'loss'); try { console.error(err); } catch {} };
+          // Explicit authorize timeout timer for backend mode as well
+          authorizeTimer = setTimeout(() => {
+            if (!authorized) {
+              log('Authorization not received via SSE within 12s. Check token/app_id and backend logs.', 'loss');
+            }
+          }, 12000);
         } catch (e) {
           log(`Backend SSE error: ${e.message || e}`, 'loss');
           return;
