@@ -48,8 +48,8 @@
     FAST_ENTRY_DIGITS: true,
     DIGITS_MIN_TICKS_BETWEEN_TRADES: 0,
 
-    // Proposals caching
-    PROPOSAL_CACHE_MS: 3500,
+  // Proposals caching (keep short to avoid expired IDs)
+  PROPOSAL_CACHE_MS: 1800,
 
     // Flip X (Even/Odd) auto spacing
     FLIPX_AUTO_MIN_INTERVAL_MS: 3000,
@@ -1131,6 +1131,8 @@
     if (fresh) {
       try {
         lastRequestedType = (key === "EVEN" ? "DIGITEVEN" : "DIGITODD");
+        // Provide buy context so an InvalidContractProposal can auto-retry
+        lastBuyContext = { type: lastRequestedType, barrier: null, qty: 1, retried: false };
         placingTrade = true; updateUILock();
         wsSend({ buy: cached.id, price: priceToUse });
         log(`Flip X ${source} buy (${key}) @ ${fmt2c(priceToUse)}`, "win");
@@ -2225,6 +2227,7 @@
     if (fresh) {
       try {
         lastRequestedType = (key === "OVER1" ? "DIGITOVER" : "DIGITUNDER");
+        lastBuyContext = { type: lastRequestedType, barrier: (key === "OVER1" ? "1" : "9"), qty: 1, retried: false };
         placingTrade = true; updateUILock();
         wsSend({ buy: cached.id, price: priceToUse });
         log(`Strike Pro fast buy (${key === "OVER1" ? "OVER 1" : "UNDER 9"}) @ ${fmt2c(priceToUse)}`, "win");
@@ -2595,6 +2598,9 @@
           const cached = proposalCache.get(barrier) || {};
           const priceToUse = Number((ask ?? cached.stake ?? burstActive.stakeFallback).toFixed(2));
           try {
+            // Set context for potential retry on buy error
+            lastRequestedType = "DIGITDIFF";
+            lastBuyContext = { type: "DIGITDIFF", barrier: barrier, qty: 1, retried: false };
             wsSend({ buy: pid, price: priceToUse });
             burstActive.sent++;
             log(`Burst buy #${burstActive.sent} @ ${fmt2c(priceToUse)}`);
@@ -2630,8 +2636,23 @@
         if (data.error) {
           const code = data.error.code || "code";
           log(`Buy error: ${data.error.message} (${code})`, "loss");
-
           const permanent = new Set(["InsufficientBalance", "AuthorizationRequired", "RateLimit", "TradingDisabled", "MarketIsClosed", "InvalidToken", "ClientInactivity", "OfferingsValidationError"]);
+          // If contract proposal ID went stale, clear cached proposal and try again once
+          if (code === 'InvalidContractProposal' && lastBuyContext && !lastBuyContext.retried) {
+            try {
+              if (lastBuyContext.type === 'DIGITDIFF' && lastBuyContext.barrier != null) {
+                proposalCache.delete(String(lastBuyContext.barrier));
+              } else if (lastBuyContext.type === 'DIGITEVEN') {
+                eoProposalCache.delete('EVEN');
+              } else if (lastBuyContext.type === 'DIGITODD') {
+                eoProposalCache.delete('ODD');
+              } else if (lastBuyContext.type === 'DIGITOVER') {
+                strikeProposalCache.delete('OVER1');
+              } else if (lastBuyContext.type === 'DIGITUNDER') {
+                strikeProposalCache.delete('UNDER9');
+              }
+            } catch {}
+          }
           if (lastBuyContext && !lastBuyContext.retried && !permanent.has(code)) {
             lastBuyContext.retried = true;
             log("Retrying buy with new proposal...");
