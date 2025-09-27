@@ -50,6 +50,9 @@
 
   // Proposals caching (keep short to avoid expired IDs)
   PROPOSAL_CACHE_MS: 1800,
+  // EV filter (auto trades only): require model probability to beat implied by buffer
+  USE_EV_FILTER: true,
+  EV_BUFFER: 0.02,
 
     // Flip X (Even/Odd) auto spacing
     FLIPX_AUTO_MIN_INTERVAL_MS: 3000,
@@ -468,6 +471,55 @@
       chartQueued = false;
       drawProfitChart();
     });
+  }
+  // Lightweight indicators and EV helpers
+  function SMA(arr, w) {
+    if (!arr || arr.length < w) return null;
+    let s = 0; for (let i = arr.length - w; i < arr.length; i++) s += arr[i];
+    return s / w;
+  }
+  function rollingStd(arr, w) {
+    if (!arr || arr.length < w) return null;
+    const slice = arr.slice(-w);
+    const mean = slice.reduce((a,b)=>a+b,0)/slice.length;
+    const v = slice.reduce((a,b)=>a+(b-mean)*(b-mean),0)/slice.length;
+    return Math.sqrt(v);
+  }
+  function RSI(arr, period = 14) {
+    if (!arr || arr.length < period + 1) return null;
+    let gains = 0, losses = 0;
+    for (let i = arr.length - period; i < arr.length; i++) {
+      const d = arr[i] - arr[i - 1];
+      if (d > 0) gains += d; else if (d < 0) losses += -d;
+    }
+    const avgG = gains / period; const avgL = losses / period;
+    if (avgL === 0) return 100;
+    const rs = avgG / avgL; return 100 - (100 / (1 + rs));
+  }
+  const lastEval = { diff: null, eo: null, strike: null, accu: null };
+  function impliedProb(ask, payout) {
+    const a = Number(ask || 0), p = Number(payout || 0);
+    if (!(a > 0 && p > 0)) return null;
+    return clamp(a / p, 0.0001, 0.9999);
+  }
+  function evAllows(pModel, pImplied, buffer = CONFIG.EV_BUFFER) {
+    if (!CONFIG.USE_EV_FILTER) return true;
+    if (pImplied == null || pModel == null) return true;
+    return pModel > pImplied * (1 + Math.max(0, buffer || 0));
+  }
+  function modelProbFor(ct) {
+    try {
+      if (ct === 'DIGITDIFF') {
+        const e = lastEval.diff; if (!e) return null; const p = (e.differsProb ?? e.confidence) / 100; return clamp(p || 0, 0, 1);
+      }
+      if (ct === 'DIGITEVEN' || ct === 'DIGITODD') {
+        const e = lastEval.eo; if (!e) return null; const dom = (e.parity === 'EVEN' ? (e.evenPct||0)/100 : (e.oddPct||0)/100); return clamp(dom, 0, 1);
+      }
+      if (ct === 'DIGITOVER' || ct === 'DIGITUNDER') {
+        const e = lastEval.strike; if (!e) return null; const p = (e.ouProbPct ?? e.confidence) / 100; return clamp(p || 0, 0, 1);
+      }
+    } catch {}
+    return null;
   }
   function updateEtClock() {
     if (etTimeEl) {
@@ -984,6 +1036,15 @@
         lastRequestedType = (key === "EVEN" ? "DIGITEVEN" : "DIGITODD");
         // Provide buy context so an InvalidContractProposal can auto-retry
         lastBuyContext = { type: lastRequestedType, barrier: null, qty: 1, retried: false };
+        // EV gate only if this was auto-triggered
+        if (source && source.startsWith('auto') && CONFIG.USE_EV_FILTER) {
+          const pImplied = impliedProb(cached.ask, cached.payout);
+          const pModel = modelProbFor(lastRequestedType);
+          if (!evAllows(pModel, pImplied)) {
+            log(`EV filter blocked auto Flip X ${key}: model ${(pModel*100).toFixed(1)}% vs implied ${(pImplied*100).toFixed(1)}%`, 'loss');
+            placingTrade = false; updateUILock(); return;
+          }
+        }
         placingTrade = true; updateUILock();
         wsSend({ buy: cached.id, price: priceToUse });
         log(`Flip X ${source} buy (${key}) @ ${fmt2c(priceToUse)}`, "win");
@@ -1130,7 +1191,7 @@
     }
 
     if (!opts.simulBurst) {
-      pendingBuy = { type: contract_type, barrier: req.barrier ?? null, qty: Math.max(1, opts.buyQty || 1) };
+      pendingBuy = { type: contract_type, barrier: req.barrier ?? null, qty: Math.max(1, opts.buyQty || 1), auto: !!autoTrade };
       placingTrade = true; updateUILock();
     }
 
@@ -1434,11 +1495,12 @@
   if (useAccumulator || useEvenOdd || useStrikePro || useDiffersVsLast) appendTickArrow(lastDigit);
 
     // Evaluate strategies
-    const diffEval = evaluateDiffersVsLast();
-    const accuEval = evaluateAccumulator();
-    const eoEval = evaluateEvenOdd();
-    const strikeEval = evaluateStrikePro();
-    lastEvenOddEval = eoEval;
+  const diffEval = evaluateDiffersVsLast();
+  const accuEval = evaluateAccumulator();
+  const eoEval = evaluateEvenOdd();
+  const strikeEval = evaluateStrikePro();
+  lastEvenOddEval = eoEval;
+  lastEval.diff = diffEval; lastEval.accu = accuEval; lastEval.eo = eoEval; lastEval.strike = strikeEval;
 
     // Flip X delayed trade countdown with guard
     if (flipxPendingDelay) {
@@ -2079,6 +2141,15 @@
       try {
         lastRequestedType = (key === "OVER1" ? "DIGITOVER" : "DIGITUNDER");
         lastBuyContext = { type: lastRequestedType, barrier: (key === "OVER1" ? "1" : "9"), qty: 1, retried: false };
+        // If this path is used by auto trading, apply EV gate
+        if (autoTrade && CONFIG.USE_EV_FILTER) {
+          const pImplied = impliedProb(cached.ask, cached.payout);
+          const pModel = modelProbFor(lastRequestedType);
+          if (!evAllows(pModel, pImplied)) {
+            log(`EV filter blocked auto Strike Pro ${key}: model ${(pModel*100).toFixed(1)}% vs implied ${(pImplied*100).toFixed(1)}%`, 'loss');
+            placingTrade = false; updateUILock(); return false;
+          }
+        }
         placingTrade = true; updateUILock();
         wsSend({ buy: cached.id, price: priceToUse });
         log(`Strike Pro fast buy (${key === "OVER1" ? "OVER 1" : "UNDER 9"}) @ ${fmt2c(priceToUse)}`, "win");
@@ -2420,7 +2491,8 @@
         const pid = data.proposal.id;
         const ct = data.echo_req.contract_type;
         const barrier = data.echo_req.barrier != null ? String(data.echo_req.barrier) : null;
-        const ask = Number(data.proposal.ask_price || 0);
+  const ask = Number(data.proposal.ask_price || 0);
+  const payout = Number(data.proposal.payout || data.proposal.return_value || 0);
 
         if (ct === "DIGITDIFF" && barrier != null) proposalInFlight.set(barrier, false);
         if (ct === "DIGITEVEN") eoProposalInFlight.set("EVEN", false);
@@ -2430,17 +2502,17 @@
 
         if (ct === "DIGITDIFF" && barrier != null && pid) {
           const prev = proposalCache.get(barrier) || {};
-          proposalCache.set(barrier, { id: pid, ts: Date.now(), stake: prev.stake, ask });
+          proposalCache.set(barrier, { id: pid, ts: Date.now(), stake: prev.stake, ask, payout });
         }
         if ((ct === "DIGITEVEN" || ct === "DIGITODD") && pid) {
           const key = ct === "DIGITEVEN" ? "EVEN" : "ODD";
           const prev = eoProposalCache.get(key) || {};
-          eoProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask });
+          eoProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask, payout });
         }
         if ((ct === "DIGITOVER" || ct === "DIGITUNDER") && pid) {
           const key = ct === "DIGITOVER" ? "OVER1" : "UNDER9";
           const prev = strikeProposalCache.get(key) || {};
-          strikeProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask });
+          strikeProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask, payout });
         }
 
         if (burstActive && ct === "DIGITDIFF" && barrier === burstActive.barrier &&
@@ -2463,6 +2535,16 @@
         }
 
         if (pid && pendingBuy && ct === pendingBuy.type && (barrier ?? null) === (pendingBuy.barrier ?? null)) {
+          // EV gating for auto trades only
+          if (pendingBuy.auto && CONFIG.USE_EV_FILTER) {
+            const pImplied = impliedProb(ask, payout);
+            const pModel = modelProbFor(ct);
+            if (!evAllows(pModel, pImplied)) {
+              log(`EV filter blocked auto ${ct}${barrier?` b=${barrier}`:""}: model ${(pModel*100).toFixed(1)}% vs implied ${(pImplied*100).toFixed(1)}%`, 'loss');
+              pendingBuy = null; placingTrade = false; updateUILock();
+              return;
+            }
+          }
           const qty = pendingBuy.qty;
           const priceToUse = Number((ask || Math.max(CONFIG.MIN_STAKE, Number(stakeInput?.value || 1) || 1)).toFixed(2));
           try {
