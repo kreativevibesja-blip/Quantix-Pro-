@@ -22,10 +22,17 @@
   <script>
     (function () {
       try {
-        if (/onrender\.com$/.test(location.hostname)) {
-          window.BACKEND_PROXY = true;
-          window.API_BASE = '';
-        }
+        const params = new URLSearchParams(location.search);
+        const mode = params.get('mode'); // allow ?mode=direct or ?mode=backend overrides
+        // Default: on Render, enable backend proxy
+        const onRender = /onrender\.com$/.test(location.hostname);
+        let useBackend = onRender;
+        if (mode === 'direct') useBackend = false;
+        if (mode === 'backend') useBackend = true;
+        window.BACKEND_PROXY = useBackend;
+        // Optionally allow overriding API base with ?api_base=https://your-backend
+        const apiBase = params.get('api_base');
+        window.API_BASE = apiBase != null ? apiBase : '';
       } catch {}
     })();
   </script>

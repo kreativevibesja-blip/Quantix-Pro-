@@ -20,7 +20,7 @@ const DERIV_APP_ID = process.env.DERIV_APP_ID || 1089; // default/fallback
 
 // Keep lightweight in-memory sessions keyed by a random id provided by client
 // Each session holds a Deriv WS connection and small state.
-const sessions = new Map(); // sessionId => { ws, authorized, currency, loginid, sseClients:Set, lastSubscribeTs:number }
+const sessions = new Map(); // sessionId => { ws, authorized, currency, loginid, lastAuthorize, sseClients:Set, lastSubscribeTs:number }
 
 // Token bucket rate limiter per session and action
 class TokenBucket {
@@ -100,7 +100,7 @@ app.post('/api/session', (req, res) => {
   if (old?.ws) { try { old.ws.close(); } catch {} sessions.delete(sessionId); }
 
   const ws = createDerivSocket(appId);
-  const sess = { ws, authorized: false, currency: 'USD', loginid: null, sseClients: new Set(), lastSubscribeTs: 0 };
+  const sess = { ws, authorized: false, currency: 'USD', loginid: null, lastAuthorize: null, sseClients: new Set(), lastSubscribeTs: 0 };
   sessions.set(sessionId, sess);
 
   let responded = false;
@@ -129,6 +129,7 @@ app.post('/api/session', (req, res) => {
       sess.authorized = true;
       sess.currency = data.authorize?.currency || 'USD';
       sess.loginid = data.authorize?.loginid || null;
+      sess.lastAuthorize = data;
       return safeRespond(200, { ok: true, currency: sess.currency, loginid: sess.loginid });
     }
   });
@@ -224,6 +225,9 @@ app.get('/api/ticks', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
+  // Initial hello and periodic keep-alive comments
+  try { res.write(`event: hello\n`); res.write(`data: {"ok":true}\n\n`); } catch {}
+  const keepAlive = setInterval(() => { try { res.write(`:\n\n`); } catch {} }, 15000);
 
   // Subscribe
   sess.ws.send(JSON.stringify({ forget_all: 'ticks' }));
@@ -246,6 +250,7 @@ app.get('/api/ticks', (req, res) => {
     try { sess.ws.off('message', onMessage); } catch {}
     try { res.end(); } catch {}
     try { sess.sseClients.delete(res); } catch {}
+    try { clearInterval(keepAlive); } catch {}
   };
   sess.ws.on('message', onMessage);
   req.on('close', onClose);
@@ -268,6 +273,16 @@ app.get('/api/events', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
+
+  // Immediately emit the last authorize snapshot so the frontend doesn't wait
+  if (sess.lastAuthorize) {
+    try {
+      res.write(`event: authorize\n`);
+      res.write(`data: ${JSON.stringify(sess.lastAuthorize)}\n\n`);
+      // Also provide a default message for generic listeners
+      res.write(`data: ${JSON.stringify(sess.lastAuthorize)}\n\n`);
+    } catch {}
+  }
 
   sess.sseClients.add(res);
   const onMessage = (buf) => {

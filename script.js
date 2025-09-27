@@ -2332,7 +2332,14 @@
           // Explicit authorize timeout timer for backend mode as well
           authorizeTimer = setTimeout(() => {
             if (!authorized) {
-              log('Authorization not received via SSE within 12s. Check token/app_id and backend logs.', 'loss');
+              let appIdInfo = '?';
+              try {
+                const u = new URL(CONFIG.DERIV_WS_URL);
+                appIdInfo = u.searchParams.get('app_id') || '?';
+              } catch {}
+              log(`Authorization not received via SSE within 12s (app_id=${appIdInfo}). Ensure your token belongs to the same Deriv App ID, or try ?mode=direct to bypass backend and compare.`, 'loss');
+              // Run a quick direct WS authorize probe to help diagnose backend vs token/app_id issues
+              try { quickAuthorizeDirect(token); } catch {}
             }
           }, 12000);
         } catch (e) {
@@ -2397,6 +2404,45 @@
       let data; try { data = JSON.parse(evt.data); } catch { return; }
       handleBackendEvent(data);
     };
+  }
+
+  // Lightweight direct WebSocket authorize probe — does not affect current session
+  function quickAuthorizeDirect(token) {
+    let probeWs;
+    try {
+      probeWs = new WebSocket(CONFIG.DERIV_WS_URL);
+    } catch (e) {
+      log(`Direct WS probe failed to open: ${e?.message || e}`,'loss');
+      return;
+    }
+    let timer = setTimeout(() => {
+      try { probeWs && probeWs.close(); } catch {}
+      log('Direct WS probe authorize timed out (10s). Likely network/app_id issue.', 'loss');
+    }, 10000);
+    probeWs.onopen = () => {
+      try { probeWs.send(JSON.stringify({ authorize: token })); } catch {}
+    };
+    probeWs.onmessage = (ev) => {
+      let d; try { d = JSON.parse(ev.data); } catch { return; }
+      if (d.msg_type === 'authorize') {
+        clearTimeout(timer); timer = null;
+        if (d.error) {
+          log(`Direct WS authorize error: ${d.error.code || ''} ${d.error.message || ''}`.trim(), 'loss');
+        } else {
+          let appIdInfo = '?';
+          try { const u = new URL(CONFIG.DERIV_WS_URL); appIdInfo = u.searchParams.get('app_id') || '?'; } catch {}
+          log(`Direct WS authorize OK (app_id=${appIdInfo}) — backend likely misconfigured.`, 'win');
+        }
+        try { probeWs.close(); } catch {}
+      }
+    };
+    probeWs.onerror = (e) => {
+      clearTimeout(timer); timer = null;
+      const msg = (e && (e.message || e.reason)) ? `: ${(e.message || e.reason)}` : '';
+      log(`Direct WS probe error${msg}`, 'loss');
+      try { probeWs.close(); } catch {}
+    };
+    probeWs.onclose = () => { if (timer) { clearTimeout(timer); timer = null; } };
   }
 
   function handleBackendEvent(data) {
