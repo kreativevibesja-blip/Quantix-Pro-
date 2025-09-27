@@ -419,6 +419,17 @@
   const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
   const fmt2 = (n) => (Number(n) || 0).toFixed(2);
   const fmt5 = (n) => (Number(n) || 0).toFixed(5);
+  // Normalize price to last 2 decimals by truncation (e.g., 5853.397 -> 5853.39)
+  function to2dpTrunc(x) {
+    const n = Number(x);
+    if (!Number.isFinite(n)) return 0;
+    return Math.trunc(n * 100) / 100;
+  }
+  function fmtPrice2(n) { return to2dpTrunc(n).toFixed(2); }
+  function lastDigitFrom2dp(n) {
+    const s = fmtPrice2(n);
+    return Number(s[s.length - 1]);
+  }
   const fmt2c = (v) => `${accountCurrency} ${fmt2(v)}`;
   const nowLocal = () => new Date().toLocaleTimeString();
   const logistic = (x, mid = 50, scale = 12) => 1 / (1 + Math.exp(-(x - mid) / scale));
@@ -1434,8 +1445,10 @@
     ticksSinceLastTrade++;
     lastTickEpoch = Number(epoch || lastTickEpoch) || lastTickEpoch;
 
-    const price = Number(quote);
-    if (Number.isNaN(price)) return;
+  const rawPrice = Number(quote);
+  if (Number.isNaN(rawPrice)) return;
+  // Truncate to 2 decimals for all analyses and UI
+  const price = to2dpTrunc(rawPrice);
 
     // Ignore duplicate tick deliveries (e.g., if an event is emitted twice by transport)
     if (epoch != null) {
@@ -1476,10 +1489,8 @@
     // Maintain a stable market trend with hysteresis
     updateStableMarketTrend();
 
-    // Extract last digit
-    let lastDigit = null;
-    if (displayValue != null) lastDigit = lastDigitFromString(String(displayValue));
-    if (lastDigit == null && Number.isFinite(price)) lastDigit = lastDigitFromString(String(price));
+  // Extract last digit from the hundredths place (2dp truncated)
+  let lastDigit = Number.isFinite(price) ? lastDigitFrom2dp(price) : null;
     const prevDigit = digitHistory[digitHistory.length - 1];
     if (Number.isInteger(lastDigit)) {
       digitHistory.push(lastDigit);
@@ -1756,7 +1767,7 @@
     const lastPrice = priceHistory[priceHistory.length - 1];
     const prevPrice = priceHistory[priceHistory.length - 2];
 
-    if (fiboPriceEl) fiboPriceEl.textContent = Number.isFinite(lastPrice) ? fmt5(lastPrice) : "—";
+  if (fiboPriceEl) fiboPriceEl.textContent = Number.isFinite(lastPrice) ? fmt2(lastPrice) : "—";
 
     const ld = digitHistory[digitHistory.length - 1];
     const pd = digitHistory.length >= 2 ? digitHistory[digitHistory.length - 2] : null;
@@ -1766,8 +1777,8 @@
 
     if (fiboDeltaEl) {
       if (Number.isFinite(lastPrice) && Number.isFinite(prevPrice)) {
-        const d = lastPrice - prevPrice;
-        fiboDeltaEl.textContent = `${d >= 0 ? "+" : ""}${fmt5(d)}`;
+  const d = lastPrice - prevPrice;
+  fiboDeltaEl.textContent = `${d >= 0 ? "+" : ""}${fmt2(d)}`;
         fiboDeltaEl.className = `kpi-value delta ${d > 0 ? "pos" : d < 0 ? "neg" : "neutral"}`;
       } else {
         fiboDeltaEl.textContent = "—"; fiboDeltaEl.className = "kpi-value delta neutral";
