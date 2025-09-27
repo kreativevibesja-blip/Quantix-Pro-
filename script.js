@@ -279,6 +279,11 @@
 
   // Stats & logs
   const resultsEl = $("results");
+  // New performance panel elements
+  const perfNetPLEl = $("perfNetPL");
+  const perfWinRateFullEl = $("perfWinRateFull");
+  const tradeHistoryListEl = $("tradeHistoryList");
+  // Legacy (panel removed) — keep null-safe
   const netProfitEl = $("netProfit");
   const totalTradesEl = $("totalTrades");
   const winsEl = $("wins");
@@ -351,6 +356,9 @@
   // Loss streak for stop condition; default 0
   let lossStreak = 0;
   const profitSeries = [0];
+  // Structured trade history items for Performance panel
+  // Each item: { id, symbol, strategy, type, stake, payout, profit, ts, status, label }
+  const tradeHistory = [];
 
   // Auto trade planning counters
   let autoTradesPlanned = 1;
@@ -373,6 +381,8 @@
   let manualAccuHold = false;
   let manualAccuHoldPending = false;
   let accuTicksElapsed = 0;
+  // Open contracts metadata map for history rendering
+  const openMeta = new Map(); // contract_id -> { symbol, strategy, type, stake, payout_est, label, opened_ts }
   let accuLastSpotTime = null;
 
   // Flip X runtime
@@ -528,7 +538,24 @@
     return { outNum: Number(s), outStr: s, lastDigit: Number(s[s.length - 1]) };
   }
   function log(msg, cls = "") {
-    if (!resultsEl) {
+    const SUPPRESS_TRADE_LOGS = true;
+    const shouldSuppress = (m) => {
+      if (!SUPPRESS_TRADE_LOGS) return false;
+      const pats = [
+        /^Buying /i,
+        /^Win /i,
+        /^Loss /i,
+        / contract \d+$/i,
+        /^Sell confirmed/i,
+        /^Auto Trade progress/i,
+        /^Auto Trade batch complete/i,
+        /^Strike Pro fast buy/i,
+        /^Strike Pro burst /i,
+        /^Burst /i
+      ];
+      return pats.some((re) => re.test(m));
+    };
+    if (!resultsEl || shouldSuppress(String(msg))) {
       console.log("[Quantix]", msg);
       return;
     }
@@ -2227,11 +2254,43 @@
     winsEl.textContent = wins;
     lossesEl.textContent = losses;
     winRateEl.textContent = totalTrades ? ((wins / totalTrades) * 100).toFixed(2) + "%" : "0%";
+    // Extended summary
+    if (perfNetPLEl) perfNetPLEl.textContent = `${fmt2c(netProfit)} USD`;
+    if (perfWinRateFullEl) perfWinRateFullEl.textContent = `${totalTrades ? ((wins/totalTrades)*100).toFixed(1) : '0.0'}% (${wins}/${totalTrades})`;
   }
 
   function updateProfitUI() {
     if (netProfitEl) netProfitEl.textContent = fmt2c(netProfit);
+    if (perfNetPLEl) perfNetPLEl.textContent = `${fmt2c(netProfit)} USD`;
     scheduleProfitDraw(); // harmless if canvas is missing
+  }
+
+  function renderTradeHistory() {
+    if (!tradeHistoryListEl) return;
+    tradeHistoryListEl.innerHTML = "";
+    // newest first
+    const items = tradeHistory.slice().reverse();
+    for (const t of items) {
+      const li = document.createElement('li');
+      li.className = 'th-item';
+      const statusClass = t.profit > 0 ? 'win' : (t.profit < 0 ? 'loss' : '');
+      li.innerHTML = `
+        <div class="th-row">
+          <div>
+            <span class="th-badge ${statusClass}">${t.symbol}</span>
+            <span class="hint" style="margin-left:8px;">${t.strategy}</span>
+          </div>
+          <div class="th-amt ${statusClass}">${t.profit > 0 ? '+' : ''}${fmt2c(t.profit)} USD</div>
+        </div>
+        <div class="th-meta">
+          <div><strong>Stake:</strong> ${fmt2c(t.stake)} USD</div>
+          <div><strong>Payout:</strong> ${fmt2c(t.payout)} USD</div>
+          <div><strong>Time:</strong> ${new Date(t.ts).toLocaleString()}</div>
+        </div>
+        <div class="hint">${t.label}</div>
+      `;
+      tradeHistoryListEl.appendChild(li);
+    }
   }
 
   function drawProfitChart() {
@@ -2395,20 +2454,26 @@
   }
 
   function updatePanelVisibility() {
-    if (panelTrading) panelTrading.classList.toggle("hidden", !(useAccumulator || useDiffersVsLast || useEvenOdd || useStrikePro));
-    const showDigitsInsights = (useDiffersVsLast && SUPPORTED.DIGITS.has(activeSymbol));
+    const anyOn = (useAccumulator || useDiffersVsLast || useEvenOdd || useStrikePro);
+    if (panelTrading) panelTrading.classList.toggle("hidden", !anyOn);
+
+    // Right column gating — hide all panels until a strategy is toggled, show placeholder instead
+    if (typeof panelConfidence !== 'undefined' && panelConfidence) panelConfidence.classList.toggle("hidden", !anyOn);
+    if (typeof panelFibo !== 'undefined' && panelFibo) panelFibo.classList.toggle("hidden", !anyOn);
+    const showDigitsInsights = anyOn && (useDiffersVsLast && SUPPORTED.DIGITS.has(activeSymbol));
     if (panelDigitsInsights) panelDigitsInsights.classList.toggle("hidden", !showDigitsInsights);
 
-    const showEO = useEvenOdd && SUPPORTED.DIGITS.has(activeSymbol);
+    const showEO = anyOn && useEvenOdd && SUPPORTED.DIGITS.has(activeSymbol);
     if (panelEvenOdd) panelEvenOdd.classList.toggle("hidden", !showEO);
     if (flipxDelayGroup) flipxDelayGroup.classList.toggle("hidden", !showEO);
 
-    if (panelAccuSettings) panelAccuSettings.classList.toggle("hidden", !(useAccumulator || !!openAccuId));
-  if (panelAccuMarket) panelAccuMarket.classList.toggle("hidden", !useAccumulator);
-  if (strikeBarrierGroup) strikeBarrierGroup.classList.toggle("hidden", !useStrikePro);
-  // Show Recent Tick Movement when any strategy is on (Bolt, Z Trade, Flip X, or Strike Pro)
-  if (panelTickMovement) panelTickMovement.classList.toggle("hidden", !useAccumulator && !useDiffersVsLast && !useEvenOdd && !useStrikePro);
+    if (panelAccuSettings) panelAccuSettings.classList.toggle("hidden", !anyOn || !(useAccumulator || !!openAccuId));
+    if (panelAccuMarket) panelAccuMarket.classList.toggle("hidden", !anyOn || !useAccumulator);
+    if (strikeBarrierGroup) strikeBarrierGroup.classList.toggle("hidden", !anyOn || !useStrikePro);
+    if (panelTickMovement) panelTickMovement.classList.toggle("hidden", !anyOn);
+    if (typeof panelSelectStrategy !== 'undefined' && panelSelectStrategy) panelSelectStrategy.classList.toggle("hidden", anyOn);
 
+    // Action rows
     if (diffActions) diffActions.classList.toggle("hidden", !useDiffersVsLast);
     if (evenOddActions) evenOddActions.classList.toggle("hidden", !useEvenOdd);
     if (accuActions) accuActions.classList.toggle("hidden", !useAccumulator && !openAccuId);
@@ -3006,6 +3071,18 @@
           placingTrade = false; updateUILock();
           if (cid) {
             wsSend({ proposal_open_contract: 1, contract_id: cid, subscribe: 1 });
+            // Capture metadata about the opened trade
+            try {
+              const sym = activeSymbol;
+              const buyPrice = Number(data.buy.buy_price || 0);
+              const payout = Number(data.buy.payout || 0);
+              let strategy = ""; let label = ""; let ttype = type || lastRequestedType;
+              if (ttype === "ACCU") { strategy = "Bolt"; label = "ACCU"; }
+              else if (ttype === "DIGITDIFF") { strategy = "Z Trade"; label = "DIFFERS"; }
+              else if (ttype === "DIGITEVEN" || ttype === "DIGITODD") { strategy = "Flip X"; label = (ttype === "DIGITEVEN" ? "EVEN" : "ODD"); }
+              else if (ttype === "DIGITOVER" || ttype === "DIGITUNDER") { strategy = "Strike Pro"; label = (ttype === "DIGITOVER" ? `OVER ${lastBuyContext?.barrier ?? ''}` : `UNDER ${lastBuyContext?.barrier ?? ''}`); }
+              openMeta.set(cid, { symbol: sym, strategy, type: ttype, stake: buyPrice, payout_est: payout, label, opened_ts: Date.now() });
+            } catch {}
             if (type === "ACCU") {
               openAccuId = cid; openAccuBuyPrice = Number(data.buy.buy_price || 0);
               accuTicksElapsed = 0; accuLastSpotTime = null;
@@ -3072,6 +3149,26 @@
           netProfit += profit; totalTrades++;
           profitSeries.push(netProfit); if (profitSeries.length > CONFIG.PROFIT_SERIES_LIMIT) profitSeries.shift();
           updateProfitUI(); updateStatsUI();
+
+          // Push to performance trade history
+          try {
+            const meta = openMeta.get(cid) || { symbol: activeSymbol, strategy: "", type: "", stake: Number(poc.buy_price||0), payout_est: Number(poc.payout||0), label: poc.contract_type || "" };
+            openMeta.delete(cid);
+            tradeHistory.push({
+              id: cid,
+              symbol: meta.symbol,
+              strategy: meta.strategy || meta.type || "",
+              type: meta.type || (poc.contract_type || ""),
+              stake: Number(meta.stake || poc.buy_price || 0),
+              payout: Number(poc.sold_for || poc.payout || meta.payout_est || 0),
+              profit: profit,
+              ts: Number(poc.sell_time || Date.now()),
+              status: profit > 0 ? 'WON' : (profit < 0 ? 'LOST' : 'EVEN'),
+              label: meta.label || `${poc.contract_type || ''}`
+            });
+            if (tradeHistory.length > 100) tradeHistory.shift();
+            renderTradeHistory();
+          } catch {}
 
           if (openAccuId && cid === openAccuId) {
             openAccuId = null; openAccuBuyPrice = 0; manualAccuHold = false;
@@ -3482,6 +3579,7 @@
     totalTrades = 0; wins = 0; losses = 0; lossStreak = 0; netProfit = 0;
     profitSeries.length = 0; profitSeries.push(0);
     updateStatsUI(); updateProfitUI();
+    try { tradeHistory.length = 0; renderTradeHistory(); } catch {}
     log("Trade history cleared.");
   });
 

@@ -175,6 +175,28 @@ code,kbd,samp,pre{font-family:var(--mono-font);}
 .panel .panel-title-inline{display:flex;align-items:center;gap:10px;}
 .panel .panel-title-inline .badge{margin-left:auto;}
 
+/* ------------------------------ PERFORMANCE PANEL (summary + list) ------------------------------ */
+.perf-summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:900px){.perf-summary-grid{grid-template-columns:1fr}}
+.perf-card{background:#12151c;border:1px solid var(--panel-border);padding:12px;border-radius:12px}
+.stat-value.big{font-size:20px}
+.trade-history{background:var(--panel-bg-2);border:1px solid var(--panel-border);border-radius:12px;padding:10px}
+.th-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.th-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;max-height:360px;overflow:auto}
+.th-item{display:flex;flex-direction:column;gap:6px;background:#0f1218;border:1px solid var(--panel-border);border-radius:10px;padding:10px}
+.th-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.th-badge{padding:3px 8px;border-radius:999px;font-size:10px;font-weight:900;border:1px solid rgba(255,255,255,0.14);color:#cfe7ff}
+.th-badge.win{background:rgba(24,210,110,0.12);border-color:rgba(24,210,110,0.35);color:#bfffdc}
+.th-badge.loss{background:rgba(255,95,109,0.12);border-color:rgba(255,95,109,0.35);color:#ffd2d6}
+.th-amt.win{color:var(--good);font-weight:900}
+.th-amt.loss{color:var(--bad);font-weight:900}
+.th-meta{display:grid;grid-template-columns:repeat(3,auto);gap:14px;color:#9fb7c7;font-size:12px}
+
+/* ------------------------------ EMPTY STATE (right column) ------------------------------ */
+.panel-emptystate{display:block}
+.empty-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:220px;text-align:center;color:#cfe7ff}
+.empty-icon{font-size:36px;margin-bottom:8px;opacity:.8}
+
 .panel.tight-stack .row + .row{margin-top:6px;}
 .panel .soft{border:0;border-top:1px solid rgba(255,255,255,0.08);}
 

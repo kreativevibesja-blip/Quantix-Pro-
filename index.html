@@ -103,7 +103,7 @@
       </div>
     </header>
 
-    <!-- LEFT COLUMN -->
+  <!-- LEFT COLUMN -->
     <div class="col-left">
       <!-- Connection -->
       <section class="panel panel-connect tight-stack">
@@ -213,10 +213,21 @@
         </div>
       </section>
 
-      <!-- Performance -->
+  <!-- Performance -->
       <section class="panel panel-stats tight-stack">
         <h2>Performance</h2>
-        <div class="stats-grid">
+        <div class="perf-summary-grid">
+          <div class="perf-card">
+            <div class="stat-label">Net Profit/Loss</div>
+            <div id="perfNetPL" class="stat-value big">$0.00 USD</div>
+          </div>
+          <div class="perf-card">
+            <div class="stat-label">Win Rate</div>
+            <div id="perfWinRateFull" class="stat-value big">0.0% (0/0)</div>
+          </div>
+        </div>
+
+        <div class="stats-grid mt-8">
           <div class="stat">
             <div class="stat-label">Total Trades</div>
             <div id="totalTrades" class="stat-value">0</div>
@@ -234,17 +245,37 @@
             <div id="winRate" class="stat-value">0%</div>
           </div>
         </div>
-        <div class="row mt-8">
-          <button id="clearHistoryBtn" class="btn danger">Clear Trade History</button>
+
+        <div class="trade-history mt-12">
+          <div class="th-header">
+            <div class="insight-title">Trade History</div>
+            <button id="clearHistoryBtn" class="btn danger sm">Clear History</button>
+          </div>
+          <ul id="tradeHistoryList" class="th-list"></ul>
         </div>
+      </section>
+
+      <!-- Activity Log (moved here) -->
+      <section class="panel panel-logs">
+        <h2>Activity Log</h2>
+        <div id="results" class="log-stream"></div>
       </section>
     </div>
 
     <!-- RIGHT COLUMN -->
     <div class="col-right">
 
+      <!-- Empty state: show until a strategy is toggled on -->
+      <section id="panelSelectStrategy" class="panel panel-emptystate">
+        <div class="empty-wrap">
+          <div class="empty-icon">📈</div>
+          <h2>Select a Trading Strategy</h2>
+          <p class="hint">Choose one of the strategies on the left to start analysis and trading.</p>
+        </div>
+      </section>
+
       <!-- Signal & Confidence -->
-      <section class="panel panel-confidence">
+      <section id="panelConfidence" class="panel panel-confidence">
         <h2>Signal & Confidence</h2>
         <div class="signal-row">
           <div id="tradeSignal" class="signal-badge">Avoid Trading</div>
@@ -602,22 +633,9 @@
         <div id="tickMovement" class="tick-movement"></div>
       </section>
 
-      <!-- Equity / Profit -->
-      <section class="panel panel-pl">
-        <h2>Equity / Profit</h2>
-        <div class="pl-top">
-          <div class="net-profit">
-            <span class="label">Net Profit:</span>
-            <span id="netProfit" class="value">$0.00</span>
-          </div>
-        </div>
-      </section>
+      
 
-      <!-- Activity Log -->
-      <section class="panel panel-logs">
-        <h2>Activity Log</h2>
-        <div id="results" class="log-stream"></div>
-      </section>
+      
     </div>
 
     <footer class="app-footer">
