@@ -2272,12 +2272,16 @@
       return "****" + s.slice(-4);
     };
 
-    // Log connection attempt with app id and masked token (no secrets in logs)
-    try {
-      const url = new URL(CONFIG.DERIV_WS_URL);
-      const appId = url.searchParams.get("app_id") || "?";
-      log(`Connecting to Deriv WS (app_id=${appId})… token=${mask(token)}`);
-    } catch { log("Connecting to Deriv WS…"); }
+    // Log connection attempt (backend proxy vs direct WS) with masked token (last 4 only)
+    if (USE_BACKEND) {
+      log(`Connecting via backend proxy… token=${mask(token)}`);
+    } else {
+      try {
+        const url = new URL(CONFIG.DERIV_WS_URL);
+        const appId = url.searchParams.get("app_id") || "?";
+        log(`Connecting to Deriv WS (app_id=${appId})… token=${mask(token)}`);
+      } catch { log("Connecting to Deriv WS…"); }
+    }
 
     if (USE_BACKEND) {
       // Create/authorize session on backend
