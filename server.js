@@ -103,9 +103,15 @@ app.post('/api/session', (req, res) => {
   const sess = { ws, authorized: false, currency: 'USD', loginid: null, sseClients: new Set(), lastSubscribeTs: 0 };
   sessions.set(sessionId, sess);
 
+  let responded = false;
+  const safeRespond = (code, data) => {
+    if (!responded) { responded = true; try { json(res, code, data); } catch {} }
+  };
+
   let authTimeout = setTimeout(() => {
     try { ws.close(); } catch {}
     sessions.delete(sessionId);
+    safeRespond(504, { error: 'authorize_timeout' });
   }, 15000);
 
   ws.on('open', () => {
@@ -118,15 +124,18 @@ app.post('/api/session', (req, res) => {
       if (data.error) {
         try { ws.close(); } catch {}
         sessions.delete(sessionId);
-        return json(res, 401, { error: data.error.message, code: data.error.code });
+        return safeRespond(401, { error: data.error.message, code: data.error.code });
       }
       sess.authorized = true;
       sess.currency = data.authorize?.currency || 'USD';
       sess.loginid = data.authorize?.loginid || null;
-      return json(res, 200, { ok: true, currency: sess.currency, loginid: sess.loginid });
+      return safeRespond(200, { ok: true, currency: sess.currency, loginid: sess.loginid });
     }
   });
-  ws.on('close', () => { sessions.delete(sessionId); });
+  ws.on('close', () => {
+    sessions.delete(sessionId);
+    if (!responded) safeRespond(502, { error: 'upstream_closed' });
+  });
   ws.on('error', () => { /* ignore, client sees via 401 path */ });
 });
 

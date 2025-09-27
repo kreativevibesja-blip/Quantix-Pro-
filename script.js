@@ -2295,7 +2295,16 @@
           } catch {}
           await backendFetch('/api/session', { method: 'POST', body: JSON.stringify({ sessionId, token, appId: appIdSend }) });
         } catch (e) {
-          log(`Backend session error: ${e.message || e}`, 'loss');
+          const code = e && e.status;
+          if (code === 401) {
+            log(`Authorize failed: ${e.message || 'invalid token or app_id mismatch'}`, 'loss');
+          } else if (code === 504) {
+            log('Authorization timed out at backend (check token/app_id and Render connectivity).', 'loss');
+          } else if (code) {
+            log(`Backend session error (${code}): ${e.message || e}`, 'loss');
+          } else {
+            log(`Backend session error: ${e.message || e}`, 'loss');
+          }
           return;
         }
         // Start SSE events stream that carries all Deriv messages
