@@ -629,5 +629,17 @@
   </script>
 
   <script src="script.js"></script>
+  <script>
+    // When hosted on Render (single Node service), route API via the backend proxy
+    // so the frontend talks to REST/SSE endpoints on the same origin.
+    (function () {
+      try {
+        if (/onrender\.com$/.test(location.hostname)) {
+          window.BACKEND_PROXY = true;
+          window.API_BASE = '';
+        }
+      } catch {}
+    })();
+  </script>
 </body>
 </html>

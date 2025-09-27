@@ -243,6 +243,43 @@ app.get('/api/ticks', (req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
+// Stream ALL Deriv messages for a session via SSE
+// Frontend can reuse existing message handling by listening to event names = msg_type
+app.get('/api/events', (req, res) => {
+  const sessionId = req.query.sessionId;
+  const sess = sessions.get(sessionId);
+  if (!sess || !sess.ws || sess.ws.readyState !== 1 || !sess.authorized) {
+    return json(res, 400, { error: 'invalid session or not authorized' });
+  }
+  if (sess.sseClients && sess.sseClients.size >= 1) {
+    return json(res, 409, { error: 'sse_already_open' });
+  }
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  sess.sseClients.add(res);
+  const onMessage = (buf) => {
+    let data; try { data = JSON.parse(buf.toString()); } catch { return; }
+    const type = data.msg_type || 'deriv';
+    try {
+      // Named event for selective listeners
+      res.write(`event: ${type}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      // Default message event for generic listeners
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch {}
+  };
+  const onClose = () => {
+    try { sess.ws.off('message', onMessage); } catch {}
+    try { res.end(); } catch {}
+    try { sess.sseClients.delete(res); } catch {}
+  };
+  sess.ws.on('message', onMessage);
+  req.on('close', onClose);
+});
+
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`Quantix Pro backend listening on :${PORT}`);

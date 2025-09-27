@@ -19,6 +19,9 @@
   const ENV =
     (typeof window !== "undefined" && (window.DERIV_ENV || "demo")) || "demo";
   const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+  // Backend proxy mode (set true to route through server.js)
+  const USE_BACKEND = (typeof window !== 'undefined' && window.BACKEND_PROXY) || false;
+  const API_BASE = (typeof window !== 'undefined' && (window.API_BASE || '')) || '';
 
   /* ===========================================================================
      0) CONFIGURATION AND CONSTANTS
@@ -252,6 +255,7 @@
 
   // Websocket and authorization
   let ws = null;
+  let eventSource = null; // when using backend SSE
   let authorized = false;
   // Read-only public feed (no authorize) for live market metrics before user connects
   let wsPublic = null;
@@ -260,6 +264,8 @@
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let lastUsedToken = null;
+  // Shared authorize timeout so both connect() and unified message handler can access it
+  let authorizeTimer = null;
 
   // Current trading symbol and account currency
   let activeSymbol = symbolSelect ? symbolSelect.value : "R_100";
@@ -1183,7 +1189,31 @@
      10) PROPOSALS, BUY/SELL, WS HELPERS
      =========================================================================== */
 
+  async function backendFetch(path, opts = {}) {
+    const res = await fetch((API_BASE || '') + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const retry = res.headers.get('Retry-After');
+      throw Object.assign(new Error(data?.error || res.statusText), { status: res.status, retryAfter: retry });
+    }
+    return res.json().catch(() => ({}));
+  }
+
   function wsSend(o) {
+    if (USE_BACKEND) {
+      // Proxy via backend /api/buy (handles rate limit + retry on UI if needed)
+      const payload = { sessionId: sessionId, request: o };
+      backendFetch('/api/buy', { method: 'POST', body: JSON.stringify(payload) }).catch((e) => {
+        if (e && e.status === 429) {
+          const wait = Number(e.retryAfter || 1) * 1000;
+          setTimeout(() => backendFetch('/api/buy', { method: 'POST', body: JSON.stringify(payload) }).catch(() => {}), wait);
+        }
+      });
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
   }
 
@@ -2212,6 +2242,11 @@
     openPublicFeedIfNeeded();
   }
 
+  let sessionId = null;
+  function newSessionId() {
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+
   function connect() {
     let token = (tokenInput?.value || "").trim();
     if (!token) token = lastUsedToken || "";
@@ -2219,7 +2254,7 @@
     lastUsedToken = token;
     manualDisconnectRequested = false;
 
-    if (ws && ws.readyState === WebSocket.OPEN) { try { ws.close(); } catch { } }
+    if (!USE_BACKEND && ws && ws.readyState === WebSocket.OPEN) { try { ws.close(); } catch { } }
 
     // Helper to mask token for logs (show last 4 chars)
     const mask = (t) => {
@@ -2235,6 +2270,36 @@
       log(`Connecting to Deriv WS (app_id=${appId})… token=${mask(token)}`);
     } catch { log("Connecting to Deriv WS…"); }
 
+    if (USE_BACKEND) {
+      // Create/authorize session on backend
+      (async () => {
+        try {
+          sessionId = newSessionId();
+          await backendFetch('/api/session', { method: 'POST', body: JSON.stringify({ sessionId, token }) });
+        } catch (e) {
+          log(`Backend session error: ${e.message || e}`, 'loss');
+          return;
+        }
+        // Start SSE events stream that carries all Deriv messages
+        try {
+          if (eventSource) { try { eventSource.close(); } catch {} eventSource = null; }
+          const url = (API_BASE || '') + `/api/events?sessionId=${encodeURIComponent(sessionId)}`;
+          eventSource = new EventSource(url);
+          eventSource.onmessage = (ev) => {
+            try { const data = JSON.parse(ev.data); handleBackendEvent(data); } catch {}
+          };
+          // Named events keyed by msg_type
+          ['authorize','balance','history','tick','proposal','proposal_open_contract','buy','sell','deriv'].forEach((t)=>{
+            eventSource.addEventListener(t, (ev)=>{ try { const d = JSON.parse(ev.data); handleBackendEvent(d); } catch {} });
+          });
+        } catch (e) {
+          log(`Backend SSE error: ${e.message || e}`, 'loss');
+          return;
+        }
+      })();
+      return; // backend mode returns here; ws flow below is skipped
+    }
+
     try {
       ws = new WebSocket(CONFIG.DERIV_WS_URL);
     } catch (e) {
@@ -2242,11 +2307,11 @@
       log("If hosted on Netlify, ensure your CSP/connect-src allows wss://ws.derivws.com and the jsdelivr CDN.", "loss");
       return;
     }
-    let authorizeTimer = null;
+  authorizeTimer = null;
 
     ws.onopen = () => {
       log("WebSocket open — sending authorize…");
-      wsSend({ authorize: token });
+  wsSend({ authorize: token });
       // If authorize response never arrives, notify user
       authorizeTimer = setTimeout(() => {
         if (!authorized) {
@@ -2287,6 +2352,13 @@
 
     ws.onmessage = (evt) => {
       let data; try { data = JSON.parse(evt.data); } catch { return; }
+      handleBackendEvent(data);
+    };
+  }
+
+  function handleBackendEvent(data) {
+      if (!data || typeof data !== 'object') return;
+      // Reuse the same message handling branches as native ws
 
       if (data.msg_type === "authorize") {
         if (authorizeTimer) { clearTimeout(authorizeTimer); authorizeTimer = null; }
@@ -2544,7 +2616,6 @@
       if (data.error) {
         log(`Server error: ${data.error.message} (${data.error.code || "code"})`, "loss");
       }
-    };
   }
 
   /* ===========================================================================
