@@ -217,6 +217,8 @@
   const tradeSignalEl = $("tradeSignal");
   const confidenceFillEl = $("confidenceFill");
   const confidencePct = $("confidencePct");
+  const panelConfidence = $("panelConfidence");
+  const panelSelectStrategy = $("panelSelectStrategy");
 
   // Strategy Metrics (panelFibo)
   const fiboSubtitleEl = $("fiboSubtitle");
@@ -236,6 +238,8 @@
   const fiboParityStreakCard = $("fiboParityStreakCard");
   const fiboParityStreakEl = $("fiboParityStreak");
   const marketTrendEl = $("marketTrend");
+  const panelFibo = $("panelFibo");
+  const panelSafeEntry = $("panelSafeEntry");
 
   // Flip X panel internals
   const eoEvenFill = $("eoEvenFill");
@@ -623,11 +627,15 @@
     return null;
   }
   function updateEtClock() {
-    if (etTimeEl) {
+    if (!etTimeEl) return;
+    try {
       etTimeEl.textContent = new Date().toLocaleTimeString("en-US", {
         timeZone: "America/New_York",
         hour12: false
       }) + " ET";
+    } catch {
+      // Fallback for environments without IANA timezone support
+      etTimeEl.textContent = new Date().toLocaleTimeString() + " (Local)";
     }
   }
 
@@ -2460,6 +2468,7 @@
     // Right column gating — hide all panels until a strategy is toggled, show placeholder instead
     if (typeof panelConfidence !== 'undefined' && panelConfidence) panelConfidence.classList.toggle("hidden", !anyOn);
     if (typeof panelFibo !== 'undefined' && panelFibo) panelFibo.classList.toggle("hidden", !anyOn);
+    if (typeof panelSafeEntry !== 'undefined' && panelSafeEntry) panelSafeEntry.classList.toggle("hidden", !anyOn);
     const showDigitsInsights = anyOn && (useDiffersVsLast && SUPPORTED.DIGITS.has(activeSymbol));
     if (panelDigitsInsights) panelDigitsInsights.classList.toggle("hidden", !showDigitsInsights);
 
