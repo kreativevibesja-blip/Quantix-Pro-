@@ -33,7 +33,7 @@
 
     // Money & thresholds
     MIN_STAKE: 0.35,
-    CONFIDENCE_THRESHOLD: 85,
+  CONFIDENCE_THRESHOLD: 82,
     MAX_LOSS_STREAK: 3,
 
     // Observational buffers (ticks, prices)
@@ -56,7 +56,7 @@
 
     // Flip X (Even/Odd) auto spacing
     FLIPX_AUTO_MIN_INTERVAL_MS: 3000,
-    EO_AUTO_MIN_CONFIDENCE: 85,
+  EO_AUTO_MIN_CONFIDENCE: 82,
 
     // Strike Pro thresholds and cooldown
     STRIKEPRO_AUTO_MIN_INTERVAL_MS: 3000,
@@ -558,6 +558,63 @@
     if (candidate !== stableTrend && trendCandidateAge >= confirmTicks) {
       stableTrend = candidate;
     }
+  }
+
+  // Hybrid gating: streak reversal detection and advanced quality checks
+  function isStreakReversalRisk() {
+    // Detect when a recent long run flips direction; for digits, use outcomesHistory; for price, use EMA flip.
+    // Digits: long run followed by immediate opposite outcome implies choppy phase.
+    const n = outcomesHistory.length;
+    if (n >= 3) {
+      const last = outcomesHistory[n - 1].outcome; // 'M' or 'D'
+      const prev = outcomesHistory[n - 2].outcome;
+      let run = 1;
+      for (let i = n - 2; i >= 0; i--) { if (outcomesHistory[i].outcome === prev) run++; else break; }
+      if (run >= 4 && last !== prev) return true; // streak reversal risk
+    }
+    // Price trend: if fast/slow coherence just flipped in last few ticks, treat as potential reversal risk
+    if (prevEmaFast != null && prevEmaSlow != null && emaFastPrice != null && emaSlowPrice != null) {
+      const prevSign = Math.sign(prevEmaFast - prevEmaSlow);
+      const nowSign = Math.sign(emaFastPrice - emaSlowPrice);
+      if (prevSign !== 0 && nowSign !== 0 && prevSign !== nowSign && trendAgeTicks <= 2) return true;
+    }
+    return false;
+  }
+
+  function advancedQualityGate(strategyKey) {
+    // Core idea: confirm with EV advantage and avoid extreme RSI or ultra-low volatility for trend strategies
+    if (!CONFIG.USE_EV_FILTER) return { ok: true, reason: "EV off" };
+    let ct; if (strategyKey === 'Z') ct = 'DIGITDIFF';
+    else if (strategyKey === 'EO') ct = (lastEval.eo?.parity === 'EVEN' ? 'DIGITEVEN' : 'DIGITODD');
+    else if (strategyKey === 'SP') ct = (lastEval.strike?.outcome === 'OVER1' ? 'DIGITOVER' : 'DIGITUNDER');
+    else if (strategyKey === 'ACCU') ct = 'ACCU';
+
+    // EV: use latest cached ask/payout if available through proposal caches
+    let ask, payout;
+    if (ct === 'DIGITDIFF' && digitHistory.length) {
+      const b = String(digitHistory[digitHistory.length - 1]);
+      const c = proposalCache.get(b); ask = c?.ask; payout = c?.payout;
+    } else if (ct === 'DIGITEVEN') { const c = eoProposalCache.get('EVEN'); ask = c?.ask; payout = c?.payout; }
+    else if (ct === 'DIGITODD') { const c = eoProposalCache.get('ODD'); ask = c?.ask; payout = c?.payout; }
+    else if (ct === 'DIGITOVER') { const c = strikeProposalCache.get('OVER1'); ask = c?.ask; payout = c?.payout; }
+    else if (ct === 'DIGITUNDER') { const c = strikeProposalCache.get('UNDER9'); ask = c?.ask; payout = c?.payout; }
+
+    const pImp = impliedProb(ask, payout);
+    const pModel = modelProbFor(ct);
+    if (!evAllows(pModel, pImp)) return { ok: false, reason: 'EV disadvantage' };
+
+    // Trend strategies (Bolt/Strike): avoid ultra-low vol or extreme RSI
+    if (strategyKey === 'ACCU' || strategyKey === 'SP') {
+      const rsi = RSI(priceHistory, 14);
+      if (rsi != null && (rsi >= 82 || rsi <= 18)) return { ok: false, reason: 'RSI extreme' };
+      const std = rollingStd(priceHistory, 14);
+      const sma = SMA(priceHistory, 14);
+      if (std != null && sma != null) {
+        const bw = (std / Math.max(1e-6, Math.abs(sma))) * 10000; // normalized width proxy
+        if (bw < 0.2) return { ok: false, reason: 'Very low volatility' };
+      }
+    }
+    return { ok: true, reason: 'EV OK' };
   }
 
   function getStableTrendDisplay() {
@@ -1571,6 +1628,13 @@
   // Auto Bolt — only when not Consolidating or low vol; skip during manual guard/burst/sequence
   if (useAccumulator && autoTrade && canAutoMore && authorized && accuEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD
     && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
+      // Hybrid gating: block streak reversals unless excellent and advanced gate ok
+      const reversal = isStreakReversalRisk();
+      const excellent = accuEval.confidence >= 95 || accuEval.goodTrade;
+      const adv = advancedQualityGate('ACCU');
+      if (reversal && !(excellent && adv.ok)) {
+        log(`Auto Bolt skipped: streak reversal (${adv.ok? 'quality OK' : adv.reason}).`, 'loss');
+      } else {
       if (stableTrend !== "RANGING" && (accuEval.volLevelPct || 0) >= 55) {
         autoAdjustSymbolForStrategy("ACCU");
         if (!openAccuId && canPlaceNow && SUPPORTED.ACCU.has(activeSymbol)) {
@@ -1580,6 +1644,7 @@
       } else {
         log("Auto Bolt skipped: consolidating or low volatility.", "loss");
       }
+      }
     }
 
     // Auto Z Trade — avoid strong clustering
@@ -1587,8 +1652,13 @@
       && diffEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD && canPlaceNow
       && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
       const drift = computeDriftMetrics();
+      const reversal = isStreakReversalRisk();
+      const excellent = diffEval.confidence >= 95 || diffEval.goodTrade;
+      const adv = advancedQualityGate('Z');
       if (drift.warn) {
         log("Auto Z Trade skipped: clustering detected.", "loss");
+      } else if (reversal && !(excellent && adv.ok)) {
+        log(`Auto Z Trade skipped: streak reversal (${adv.ok ? 'quality OK' : adv.reason}).`, 'loss');
       } else {
         autoAdjustSymbolForStrategy("DIGITDIFF");
         const lastDigitNow = digitHistory[digitHistory.length - 1];
@@ -1605,14 +1675,21 @@
       const nowTs = Date.now();
       const intervalOK = (nowTs - lastFlipXAutoTs) >= CONFIG.FLIPX_AUTO_MIN_INTERVAL_MS;
       const confidenceOK = eoEval.confidence >= CONFIG.EO_AUTO_MIN_CONFIDENCE;
+      const reversal = isStreakReversalRisk();
+      const excellent = eoEval.confidence >= 95 || eoEval.goodTrade;
+      const adv = advancedQualityGate('EO');
       const evidenceOK = (eoEval.evidenceStrength || 0) >= 4 && (eoEval.lastRun || 0) <= 4;
       if (intervalOK && confidenceOK && evidenceOK) {
+        if (reversal && !(excellent && adv.ok)) {
+          log(`Auto Flip X skipped: streak reversal (${adv.ok ? 'quality OK' : adv.reason}).`, 'loss');
+        } else {
         if (!flipxPendingDelay) {
           startFlipXDelayedTrade(eoEval.parity, "auto", eoEval);
           ticksSinceLastTrade = 0;
           lastFlipXAutoTs = nowTs;
         } else {
           log("Auto Flip X signal skipped: delay already pending.", "loss");
+        }
         }
       } else if (!evidenceOK) {
         log("Auto Flip X skipped: insufficient evidence or long streak.", "loss");
@@ -1625,6 +1702,12 @@
       const nowTs = Date.now();
       const cooldownOk = (nowTs - lastStrikeTs) >= CONFIG.STRIKEPRO_AUTO_MIN_INTERVAL_MS;
       if (cooldownOk && strikeEval.confidence >= CONFIG.STRIKEPRO_MIN_CONFIDENCE) {
+        const reversal = isStreakReversalRisk();
+        const excellent = strikeEval.confidence >= 95 || strikeEval.goodTrade;
+        const adv = advancedQualityGate('SP');
+        if (reversal && !(excellent && adv.ok)) {
+          log(`Auto Strike Pro skipped: streak reversal (${adv.ok ? 'quality OK' : adv.reason}).`, 'loss');
+        } else {
         if (strikeEval.outcome === "OVER1") {
           autoAdjustSymbolForStrategy("DIGITOVER");
           let didFast = false;
@@ -1647,6 +1730,7 @@
           }
           ticksSinceLastTrade = 0;
           lastStrikeTs = nowTs;
+        }
         }
       }
     }
