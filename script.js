@@ -355,6 +355,8 @@
   let lastTickEpoch = 0;
   // De-duplication key for incoming ticks (epoch+price)
   let lastTickKey = null;
+  // Pause auto strategies briefly after manual actions to prevent cross-triggering
+  let manualActionGuardUntil = 0;
 
   // Proposals caches and in-flight guards
   const proposalCache = new Map(); // DIGITDIFF: barrier => {id, ts, stake, ask}
@@ -1159,6 +1161,10 @@
     if (!SUPPORTED.DIGITS.has(activeSymbol)) { log("Digits not offered on symbol.", "loss"); return; }
     if (digitHistory.length < 1) { log("Need a digit first.", "loss"); return; }
 
+    // Clear any stale pending and pause autos briefly
+    pendingBuy = null; placingTrade = false; updateUILock();
+    manualActionGuardUntil = Date.now() + 2000;
+
     const lastDigit = digitHistory[digitHistory.length - 1];
     const barrier = String(lastDigit);
     const stakeFallback = Math.max(CONFIG.MIN_STAKE, Number(stakeInput?.value || 1) || 1);
@@ -1183,6 +1189,9 @@
     if (!useDiffersVsLast) { log("Enable Z Trade first.", "loss"); return; }
     autoAdjustSymbolForStrategy("DIGITDIFF");
     if (!SUPPORTED.DIGITS.has(activeSymbol)) { log("Digits not on symbol.", "loss"); return; }
+
+    pendingBuy = null; placingTrade = false; updateUILock();
+    manualActionGuardUntil = Date.now() + 2000;
 
     seqPlan = { remaining: 3, stopOnLoss: true, awaitingTick: false, waitEpoch: lastTickEpoch };
     log("Sequential plan (3) started.");
@@ -1619,8 +1628,9 @@
     // Auto-trade guard: respect batch limit
     const canAutoMore = autoTradesDone < autoTradesPlanned;
 
-    // Auto Bolt — only when not Consolidating or low vol
-    if (useAccumulator && autoTrade && canAutoMore && authorized && accuEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD) {
+  // Auto Bolt — only when not Consolidating or low vol; skip during manual guard/burst/sequence
+  if (useAccumulator && autoTrade && canAutoMore && authorized && accuEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD
+    && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
       if (stableTrend !== "RANGING" && (accuEval.volLevelPct || 0) >= 55) {
         autoAdjustSymbolForStrategy("ACCU");
         if (!openAccuId && canPlaceNow && SUPPORTED.ACCU.has(activeSymbol)) {
@@ -1634,7 +1644,8 @@
 
     // Auto Z Trade — avoid strong clustering
     if (useDiffersVsLast && autoTrade && canAutoMore && authorized && diffEval.tradeType === "DIGITDIFF"
-      && diffEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD && canPlaceNow) {
+      && diffEval.confidence >= CONFIG.CONFIDENCE_THRESHOLD && canPlaceNow
+      && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
       const drift = computeDriftMetrics();
       if (drift.warn) {
         log("Auto Z Trade skipped: clustering detected.", "loss");
@@ -1649,7 +1660,8 @@
     }
 
     // Auto Flip X with delay — require basic evidence; avoid very long runs
-    if (useEvenOdd && autoTrade && canAutoMore && authorized && eoEval.tradeType === "EVENODD" && canPlaceNow) {
+  if (useEvenOdd && autoTrade && canAutoMore && authorized && eoEval.tradeType === "EVENODD" && canPlaceNow
+    && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
       const nowTs = Date.now();
       const intervalOK = (nowTs - lastFlipXAutoTs) >= CONFIG.FLIPX_AUTO_MIN_INTERVAL_MS;
       const confidenceOK = eoEval.confidence >= CONFIG.EO_AUTO_MIN_CONFIDENCE;
@@ -1668,7 +1680,8 @@
     }
 
     // Auto Strike Pro — place trades for OVER 1 or UNDER 9 (no safety skips)
-    if (useStrikePro && autoTrade && canAutoMore && authorized && SUPPORTED.DIGITS.has(activeSymbol) && canPlaceNow) {
+  if (useStrikePro && autoTrade && canAutoMore && authorized && SUPPORTED.DIGITS.has(activeSymbol) && canPlaceNow
+    && Date.now() >= manualActionGuardUntil && !burstActive && !seqPlan) {
       const nowTs = Date.now();
       const cooldownOk = (nowTs - lastStrikeTs) >= CONFIG.STRIKEPRO_AUTO_MIN_INTERVAL_MS;
       if (cooldownOk && strikeEval.confidence >= CONFIG.STRIKEPRO_MIN_CONFIDENCE) {
