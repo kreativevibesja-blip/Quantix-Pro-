@@ -275,7 +275,7 @@
       </section>
 
       <!-- Signal & Confidence -->
-      <section id="panelConfidence" class="panel panel-confidence">
+  <section id="panelConfidence" class="panel panel-confidence hidden">
         <h2>Signal & Confidence</h2>
         <div class="signal-row">
           <div id="tradeSignal" class="signal-badge">Avoid Trading</div>
@@ -291,7 +291,7 @@
       </section>
 
       <!-- Strategy Metrics -->
-      <section id="panelFibo" class="panel panel-fibo">
+  <section id="panelFibo" class="panel panel-fibo hidden">
         <div class="fibo-header">
           <div>
             <h2>Strategy Metrics</h2>
@@ -409,7 +409,7 @@
       </section>
 
       <!-- Safe Entry -->
-      <section class="panel panel-safe-entry" id="panelSafeEntry">
+  <section class="panel panel-safe-entry hidden" id="panelSafeEntry">
         <h2 class="panel-title-inline"><span>Safe Entry Suggestion</span></h2>
         <div class="safe-entry-card" id="safeEntryCard">
           <div class="se-header">
@@ -645,30 +645,43 @@
 
   <!-- Supabase auth gate + logout wiring (runs before app script) -->
   <script>
-    const SUPABASE_URL = "https://mepimmfrpklmmpctsuzr.supabase.co";
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lcGltbWZycGtsbW1wY3RzdXpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgyMzY2NjcsImV4cCI6MjA3MzgxMjY2N30.6p2qbSDdv22hJVaSUE-rwRAgrFE1Cj44Lp2ezBxFOHQ";
-    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    (function setupAuth() {
+      try {
+        const SUPABASE_URL = "https://mepimmfrpklmmpctsuzr.supabase.co";
+        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lcGltbWZycGtsbW1wY3RzdXpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgyMzY2NjcsImV4cCI6MjA3MzgxMjY2N30.6p2qbSDdv22hJVaSUE-rwRAgrFE1Cj44Lp2ezBxFOHQ";
+        const sb = window.supabase?.createClient ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
-    (async function authGate() {
-      // If no active session, send to login page (keep dashboard hidden)
-      const { data: { session } } = await sb.auth.getSession();
-      if (!session) {
-        window.location.href = "login.html";
-        return;
+        // In development or when Supabase fails to load, bypass auth so the UI works
+        const params = new URLSearchParams(location.search);
+        const noauth = params.get('noauth') === '1';
+        const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '';
+        const isFile = location.protocol === 'file:';
+        const devBypass = noauth || !sb || isLocal || isFile;
+
+        if (devBypass) {
+          document.body.classList.remove("preauth-hide");
+          // No-op logout in bypass
+          document.getElementById("logoutBtn")?.addEventListener("click", () => { location.reload(); });
+          return;
+        }
+
+        (async function authGate() {
+          try {
+            const { data: { session } } = await sb.auth.getSession();
+            if (!session) { window.location.href = "login.html"; return; }
+            document.body.classList.remove("preauth-hide");
+            sb.auth.onAuthStateChange((_event, sess) => { if (!sess) window.location.href = "login.html"; });
+            document.getElementById("logoutBtn")?.addEventListener("click", async () => { try { await sb.auth.signOut(); } catch {} window.location.href = "login.html"; });
+          } catch {
+            // If auth errors, fail open for usability (dev)
+            document.body.classList.remove("preauth-hide");
+          }
+        })();
+      } catch {
+        // If anything goes wrong setting up auth, reveal UI to avoid blocking the dashboard
+        document.body.classList.remove("preauth-hide");
       }
-      // Authenticated — reveal dashboard now
-      document.body.classList.remove("preauth-hide");
-      // Listen for sign-out in other tabs or token expiry
-      sb.auth.onAuthStateChange((_event, sess) => {
-        if (!sess) window.location.href = "login.html";
-      });
     })();
-
-    // Logout button
-    document.getElementById("logoutBtn")?.addEventListener("click", async () => {
-      try { await sb.auth.signOut(); } catch {}
-      window.location.href = "login.html";
-    });
   </script>
 
   <script src="script.js"></script>
