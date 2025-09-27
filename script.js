@@ -1240,7 +1240,12 @@
   function requestProposal(contract_type, opts = {}) {
     if (contract_type === "ACCU" && !SUPPORTED.ACCU.has(activeSymbol)) { log("Bolt unsupported here.", "loss"); return; }
     if (contract_type.startsWith("DIGIT") && !SUPPORTED.DIGITS.has(activeSymbol)) { log("Digits unsupported here.", "loss"); return; }
-    if (!ws || ws.readyState !== WebSocket.OPEN) { log("WebSocket not open", "loss"); return; }
+    // In backend mode, we proxy via HTTP; a browser WebSocket is not required
+    if (!USE_BACKEND && (!ws || ws.readyState !== WebSocket.OPEN)) {
+      // In direct mode, we need an open socket to request proposals
+      log("WebSocket not open — connect first to place a request.", "loss");
+      return;
+    }
 
     const stake = Math.max(CONFIG.MIN_STAKE, Number(stakeInput?.value || 1) || 1);
     const req = {
@@ -1599,13 +1604,20 @@
     updateDigitsPanelsIfEnabled();
     if (useAccumulator) updateAccuConditions(accuEval.consistencyPct, accuEval.volLevelPct);
 
-    // Confidence bar and Safe Entry
+  // Confidence bar and Safe Entry — pick the best among ALL strategies (suggestions)
     let activeEvalForSafe = null;
     let activeConfidence = 0, activeSource = "None";
-    if (useStrikePro) { activeEvalForSafe = strikeEval; activeConfidence = strikeEval.confidence; activeSource = "Strike Pro"; }
-    else if (useAccumulator) { activeEvalForSafe = accuEval; activeConfidence = accuEval.confidence; activeSource = "Bolt"; }
-    else if (useDiffersVsLast && diffEval.tradeType) { activeEvalForSafe = diffEval; activeConfidence = diffEval.confidence; activeSource = "Z Trade"; }
-    else if (useEvenOdd && eoEval.tradeType) { activeEvalForSafe = eoEval; activeConfidence = eoEval.confidence; activeSource = "Flip X"; }
+    const candidates = [];
+  if (accuEval && (accuEval.confidence || 0) > 0) candidates.push({ name: "Bolt", ev: accuEval, conf: accuEval.confidence });
+  if (diffEval && (diffEval.confidence || 0) > 0) candidates.push({ name: "Z Trade", ev: diffEval, conf: diffEval.confidence + (diffEval.goodTrade ? 3 : 0) });
+  if (eoEval && (eoEval.confidence || 0) > 0) candidates.push({ name: "Flip X", ev: eoEval, conf: eoEval.confidence + (eoEval.goodTrade ? 2 : 0) });
+  if (strikeEval && (strikeEval.confidence || 0) > 0) candidates.push({ name: "Strike Pro", ev: strikeEval, conf: strikeEval.confidence + (strikeEval.goodTrade ? 4 : 0) });
+    if (candidates.length) {
+      candidates.sort((a,b)=> b.conf - a.conf);
+      activeEvalForSafe = candidates[0].ev;
+      activeConfidence = activeEvalForSafe.confidence;
+      activeSource = candidates[0].name;
+    }
 
     setConfidenceBar(activeConfidence, activeSource);
     updateSuggestedActionStrength(activeEvalForSafe);
