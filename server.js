@@ -16,8 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 3000;
-const DERIV_APP_ID = process.env.DERIV_APP_ID || 1089; // dev fallback
-const DERIV_WS = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
+const DERIV_APP_ID = process.env.DERIV_APP_ID || 1089; // default/fallback
 
 // Keep lightweight in-memory sessions keyed by a random id provided by client
 // Each session holds a Deriv WS connection and small state.
@@ -65,8 +64,10 @@ function getLimiter(sessionId, key) {
   return m[key];
 }
 
-function createDerivSocket() {
-  const ws = new WebSocket(DERIV_WS);
+function createDerivSocket(appIdOverride) {
+  const appId = appIdOverride || DERIV_APP_ID;
+  const url = `wss://ws.derivws.com/websockets/v3?app_id=${appId}`;
+  const ws = new WebSocket(url);
   return ws;
 }
 
@@ -91,14 +92,14 @@ app.get('/login.html', (_req, res) => {
 // POST /api/session { sessionId, token }
 // DELETE /api/session?sessionId=...
 app.post('/api/session', (req, res) => {
-  const { sessionId, token } = req.body || {};
+  const { sessionId, token, appId } = req.body || {};
   if (!sessionId || !token) return json(res, 400, { error: 'sessionId and token required' });
 
   // Close old session if exists
   const old = sessions.get(sessionId);
   if (old?.ws) { try { old.ws.close(); } catch {} sessions.delete(sessionId); }
 
-  const ws = createDerivSocket();
+  const ws = createDerivSocket(appId);
   const sess = { ws, authorized: false, currency: 'USD', loginid: null, sseClients: new Set(), lastSubscribeTs: 0 };
   sessions.set(sessionId, sess);
 

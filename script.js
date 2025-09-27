@@ -2288,7 +2288,12 @@
       (async () => {
         try {
           sessionId = newSessionId();
-          await backendFetch('/api/session', { method: 'POST', body: JSON.stringify({ sessionId, token }) });
+          let appIdSend = null;
+          try {
+            const u = new URL(CONFIG.DERIV_WS_URL);
+            appIdSend = Number(u.searchParams.get('app_id')) || null;
+          } catch {}
+          await backendFetch('/api/session', { method: 'POST', body: JSON.stringify({ sessionId, token, appId: appIdSend }) });
         } catch (e) {
           log(`Backend session error: ${e.message || e}`, 'loss');
           return;
