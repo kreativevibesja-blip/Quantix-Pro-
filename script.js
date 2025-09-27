@@ -727,6 +727,47 @@
     }
 
     const conf = clamp(Math.round(evalObj.confidence || 0), 0, 100);
+
+    // Forced AVOID conditions requested by user
+    let forceAvoid = false; let avoidMsg = "";
+    // A) Z Trade: when MATCHES appears / regime not favorable
+    if (evalObj.tradeType === 'DIGITDIFF') {
+      const dp = Number(evalObj.differsProb ?? 0);
+      const lastOut = outcomesHistory.length ? outcomesHistory[outcomesHistory.length - 1].outcome : null;
+      if (dp < 50 || lastOut === 'M') {
+        forceAvoid = true; avoidMsg = 'MATCHES regime detected — stand aside';
+      }
+    }
+    // B) Strike Pro: when current digit equals barrier (edge absent)
+    if (evalObj.tradeType === 'STRIKEPRO') {
+      const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+      const ld = (lastDigit2dp != null) ? lastDigit2dp : digitHistory[digitHistory.length - 1];
+      if (Number.isInteger(ld) && ld === B) {
+        forceAvoid = true; avoidMsg = `Current digit equals barrier ${B} — edge absent`;
+      }
+    }
+    // C) Flip X: avoid on extreme streaks / low evidence / no clear edge
+    if (evalObj.tradeType === 'EVENODD') {
+      const evid = Number(evalObj.evidenceStrength || 0);
+      const run = Number(evalObj.lastRun || 0);
+      const dominantPct = evalObj.parity === 'EVEN' ? Number(evalObj.evenPct || 0) : Number(evalObj.oddPct || 0);
+      if (run >= 6) { forceAvoid = true; avoidMsg = `Extreme parity streak (${run}) — stand aside`; }
+      else if (evid < 8) { forceAvoid = true; avoidMsg = `Insufficient parity evidence (${evid})`; }
+      else if (dominantPct < 54 && evid < 16) { forceAvoid = true; avoidMsg = `No clear parity edge (${dominantPct.toFixed(1)}%)`; }
+    }
+
+    if (forceAvoid) {
+      card.className = "safe-entry-card state-avoid";
+      statusTextEl.textContent = "UNFAVORABLE ENTRY CONDITIONS";
+      actionEl.textContent = "Stand aside — conditions not favorable";
+      analysisEl.textContent = (evalObj.reason ? (evalObj.reason + ' • ') : '') + avoidMsg;
+      riskTextEl.textContent = "HIGH RISK";
+      bottomIcon.textContent = "⚠️";
+      bottomText.textContent = "Adverse condition detected — wait for a better setup.";
+      updateSafeEntryScale(0);
+      return;
+    }
+
     const sig = classifySignal(conf, !!evalObj.goodTrade, threshold, evalObj.tradeType, !!evalObj.synergy);
     card.className = `safe-entry-card state-${sig.key}`;
     statusTextEl.textContent = sig.label;
@@ -1479,8 +1520,10 @@
       const pill = document.createElement("span");
       pill.className = `digit-pill ${lastDigit % 2 === 0 ? "even" : "odd"}`;
       pill.textContent = String(lastDigit);
-      if (useStrikePro && (lastDigit === 1 || lastDigit === 9)) {
-        pill.classList.add(lastDigit === 1 ? "highlight-1" : "highlight-9");
+      // Highlight current Strike Pro barrier digit in tick movement
+      if (useStrikePro) {
+        const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+        if (lastDigit === B) pill.classList.add("highlight-barrier");
       }
       wrap.appendChild(pill);
     }

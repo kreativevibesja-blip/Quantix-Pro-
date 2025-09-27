@@ -996,3 +996,4 @@ body.compact .app-footer{ font-size: 11px; }
 /* Tick stream digit highlight for Strike Pro (1 / 9) */
 .tick-movement .digit-pill.highlight-1{ box-shadow:0 0 0 2px rgba(24,210,110,0.6) inset; }
 .tick-movement .digit-pill.highlight-9{ box-shadow:0 0 0 2px rgba(255,95,109,0.6) inset; }
+.tick-movement .digit-pill.highlight-barrier{ box-shadow:0 0 0 2px rgba(255,223,77,0.8) inset; }
