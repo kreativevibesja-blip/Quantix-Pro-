@@ -769,68 +769,40 @@
      =========================================================================== */
 
   function evaluateDiffersVsLast() {
-    // Use full available history; analysis window input removed
-    const need = digitHistory.length;
-    const have = digitHistory.length;
+    // Simplified: use recent transitions ratio and last run-length bias
     if (digitHistory.length < 2) return { confidence: 0, tradeType: null, barrier: null, reason: "Waiting for digits", stickyPct: 0 };
 
     const lastDigit = digitHistory[digitHistory.length - 1];
     const transitions = [];
     for (let i = 1; i < digitHistory.length; i++) transitions.push(digitHistory[i] === digitHistory[i - 1] ? "M" : "D");
+    const W = Math.min(48, transitions.length);
+    if (W <= 0) return { confidence: 0, tradeType: null, barrier: String(lastDigit), reason: "Insufficient transitions", stickyPct: 0 };
+    const slice = transitions.slice(-W);
+    const diffCount = slice.filter(x => x === 'D').length;
+    let pDiff = diffCount / W; // base probability of differs
 
-    if (!transitions.length) return {
-      confidence: 0, tradeType: null, barrier: String(lastDigit),
-      reason: "Insufficient transitions", stickyPct: 0
-    };
+    // Last run-length and outcome
+    let runLen = 1; for (let i = slice.length - 2; i >= 0; i--) { if (slice[i] === slice[i + 1]) runLen++; else break; }
+    const lastOutcome = slice[slice.length - 1];
+    // Gentle bias: short runs add a small boost to change; long runs reduce
+    if (lastOutcome === 'M') pDiff = Math.min(1, pDiff + Math.min((runLen - 1) * 0.02, 0.08));
+    else pDiff = Math.max(0, pDiff - Math.min((runLen - 1) * 0.02, 0.08));
 
-  const windows = [6, 8, 12, 16, 24, 32, 48, 64].filter(w => w <= need);
-    const alpha0 = 5, beta0 = 5;
-    let blendedP = 0, weightSum = 0;
+    const differsProb = pDiff * 100;
+    const stickyPct = Math.round(100 - differsProb);
 
-    windows.forEach((w) => {
-      const slice = transitions.slice(-w);
-      if (slice.length < 4) return;
-      const diff = slice.filter(x => x === "D").length;
-      const mean = (alpha0 + diff) / (alpha0 + beta0 + slice.length);
-      const recW = Math.max(0.6, Math.min(1.4, 1.2 - (w / 128)));
-      const wt = Math.sqrt(slice.length) * recW;
-      blendedP += mean * wt; weightSum += wt;
-    });
-
-    if (!weightSum) {
-      const diffAll = transitions.filter(x => x === "D").length;
-      blendedP = diffAll / transitions.length;
-    } else blendedP /= weightSum;
-
-    let runLen = 1;
-    for (let i = transitions.length - 2; i >= 0; i--) {
-      if (transitions[i] === transitions[i + 1]) runLen++; else break;
-    }
-    const lastOutcome = transitions[transitions.length - 1];
-
-    if (lastOutcome === "M") blendedP = Math.min(1, blendedP + Math.min((runLen - 1) * 0.025, 0.15));
-    else blendedP = Math.max(0, blendedP - Math.min((runLen - 1) * 0.02, 0.10));
-
-    const stickyPct = Math.round((transitions.filter(x => x === "M").length / transitions.length) * 100);
-    const differsProb = 100 - stickyPct;
-
-    const p = clamp(blendedP, 0.0001, 0.9999);
-    const entropy = - (p * Math.log2(p) + (1 - p) * Math.log2(1 - p));
-    const entropyFactor = 1 - Math.min(0.28, entropy * 0.28);
-  let confidence = clamp(Math.round(logistic(blendedP * 100, 58, 9) * 100 * entropyFactor), 0, 98);
-
+    // Confidence from separation from 50%; cap and adjust by drift
+    let confidence = clamp(Math.round((Math.max(0, differsProb - 50) / 50) * 100), 0, 98);
     const drift = computeDriftMetrics();
-    if (drift.pattern === "CLUSTERING" && drift.strength >= 60 && lastOutcome === "M") {
-      confidence = Math.max(0, confidence - 8);
-    }
+    if (drift.pattern === 'CLUSTERING' && drift.strength >= 60 && lastOutcome === 'M') confidence = Math.max(0, confidence - 10);
 
-  const goodTrade = (confidence >= 90) && (differsProb >= 60) && !(drift.pattern === "CLUSTERING" && drift.strength >= 75);
+    const goodTrade = (confidence >= 90) && (differsProb >= 60) && !(drift.pattern === 'CLUSTERING' && drift.strength >= 75);
 
     return {
       confidence,
-      tradeType: "DIGITDIFF",
+      tradeType: 'DIGITDIFF',
       barrier: String(lastDigit),
-      reason: `Differs≈${differsProb.toFixed(1)}% | Run=${runLen}${lastOutcome} | Entropy=${entropy.toFixed(2)} | Drift=${drift.pattern}/${drift.strength}%`,
+      reason: `Differs≈${differsProb.toFixed(1)}% | Run=${runLen}${lastOutcome} | Drift=${drift.pattern}/${drift.strength}%`,
       stickyPct,
       differsProb,
       runLen,
@@ -839,211 +811,111 @@
   }
 
   function evaluateAccumulator() {
-    const minTicks = 25;
+    // Simplified Bolt: EMA coherence + directional consistency + moderate volatility
+    const minTicks = 20;
     if (priceHistory.length < minTicks)
-      return {
-        confidence: 0,
-        reason: `Collecting data (${priceHistory.length}/${minTicks})`,
-        consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade: false
-      };
+      return { confidence: 0, reason: `Collecting data (${priceHistory.length}/${minTicks})`, consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade: false };
 
     const deltas = [];
     for (let i = 1; i < priceHistory.length; i++) deltas.push(priceHistory[i] - priceHistory[i - 1]);
-
     const absD = deltas.map(Math.abs);
-    const medAbs = median(absD) || 0.0001;
+    const medAbs = median(absD) || 1e-6;
 
-    function dirCons(w) {
-      if (deltas.length < w) return null;
-      const s = deltas.slice(-w);
-      let up = 0, dn = 0;
-      s.forEach(x => { if (x > 0) up++; else if (x < 0) dn++; });
-      return Math.max(up, dn) / s.length;
-    }
+    // Directional consistency over last 30 samples
+    const W = Math.min(30, deltas.length);
+    const recent = deltas.slice(-W);
+    const ups = recent.filter(x => x > 0).length;
+    const dns = recent.filter(x => x < 0).length;
+    const dirConsistency = (Math.max(ups, dns) / Math.max(1, recent.length)) * 100;
 
-    const parts = [dirCons(12), dirCons(30), dirCons(60)].filter(Boolean);
-    const multi = parts.length ? parts.map((c, i) => c * (1 + i * 0.25)).reduce((a, b) => a + b, 0) / parts.length : 0.5;
-    const normalizedConsistency = multi * 100;
-
-    const spikesThr = medAbs * 3;
-    const spikeCount = absD.slice(-50).filter(a => a >= spikesThr).length;
-    const spikeRatio = spikeCount / Math.min(50, absD.length || 1);
-    const stdAbs = Math.sqrt(absD.reduce((a, b) => a + (b - medAbs) * (b - medAbs), 0) / (absD.length || 1));
-
-    let volRaw = 100 - 50 * clamp(stdAbs / (medAbs * 3), 0, 1) - 50 * clamp(spikeRatio / 0.25, 0, 1);
-    emaVol = clamp(EMA(emaVol, volRaw, 0.12), 0, 100);
+    // Volatility level: penalize extremes, favor moderate
+    const avgAbs = recent.reduce((a,b)=>a+Math.abs(b),0)/Math.max(1,recent.length);
+    const volLevelRaw = 100 - 100 * clamp(Math.abs(avgAbs - medAbs) / (medAbs * 3), 0, 1);
+    emaVol = clamp(EMA(emaVol, volLevelRaw, 0.12), 0, 100);
 
     if (emaFastPrice == null || emaSlowPrice == null || prevEmaFast == null || prevEmaSlow == null)
-      return { confidence: 0, reason: "Initializing EMA trend components", consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade: false };
+      return { confidence: 0, reason: "Initializing EMA components", consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade: false };
 
     const slopeFast = emaFastPrice - prevEmaFast;
     const slopeSlow = emaSlowPrice - prevEmaSlow;
     const coherence = (Math.sign(slopeFast) === Math.sign(slopeSlow)) ? 1 : 0;
 
-    const momentumAvg = deltas.slice(-30).reduce((a, b) => a + b, 0) / (Math.min(30, deltas.length) || 1);
+    // Momentum relative to median move
+    const momentumAvg = recent.reduce((a,b)=>a+b,0)/Math.max(1,recent.length);
     emaMomentum = EMA(emaMomentum, momentumAvg, 0.2);
     const boundedMomentum = clamp(Math.abs(emaMomentum) / (medAbs || 1e-6) / 4, 0, 1);
 
-    emaConsistency = EMA(emaConsistency, normalizedConsistency, 0.15);
-
+    emaConsistency = EMA(emaConsistency, dirConsistency, 0.15);
     const trendAge = clamp(trendAgeTicks, 0, 200);
 
+    // Simple composite
     let composite = 0;
-    composite += 0.30 * (emaConsistency / 100);
-    composite += 0.20 * (emaVol / 100);
-    composite += 0.18 * coherence;
-    composite += 0.16 * (boundedMomentum > 0.15 ? 1 : 0.6);
-    composite += 0.10 * boundedMomentum;
-    composite += 0.06 * clamp(trendAge / 20, 0, 1);
-
-    if (spikeRatio > 0.30) composite -= 0.08;
-    if (emaVol < 40) composite -= 0.08;
+    composite += 0.4 * (emaConsistency / 100);
+    composite += 0.25 * (emaVol / 100);
+    composite += 0.2 * coherence;
+    composite += 0.15 * boundedMomentum;
     composite = clamp(composite, 0, 1);
 
-    let confidenceRaw = logistic(composite * 100, 58, 10) * 100;
-    let confidence = clamp(Math.round(confidenceRaw), 0, 98);
+    let confidence = clamp(Math.round(composite * 100), 0, 98);
+    if (stableTrend === 'RANGING' && emaVol < 55) confidence = Math.max(0, confidence - 5);
+    if (stableTrend === 'UP' || stableTrend === 'DOWN') confidence = Math.min(98, confidence + 2);
 
-    // Market trend integration: avoid consolidations with low vol; reward clear trend regimes
-    if (stableTrend === "RANGING" && emaVol < 55) confidence = Math.max(0, confidence - 5);
-    if (stableTrend === "UP" || stableTrend === "DOWN") confidence = Math.min(98, confidence + 2);
+    const goodTrade = (emaConsistency >= 90) && (emaVol >= 60) && coherence === 1 && confidence >= 90 && trendAge >= 6 && stableTrend !== 'RANGING';
 
-    const goodTrade = (emaConsistency > 92) && (emaVol > 65) && coherence === 1 && confidence >= 90 && trendAge >= 6 && stableTrend !== "RANGING";
-
-    return {
-      confidence: goodTrade ? Math.max(confidence, 99) : confidence,
-      reason: `Trend=${emaConsistency.toFixed(1)}% Vol=${emaVol.toFixed(0)}% Coherent=${coherence} Mom=${boundedMomentum.toFixed(2)} Age=${trendAge} Conf=${confidence}%`,
-      consistencyPct: emaConsistency,
-      volLevelPct: emaVol,
-      goodTrade
-    };
+    return { confidence, reason: `Trend=${emaConsistency.toFixed(1)}% Vol=${emaVol.toFixed(0)}% Coherent=${coherence} Mom=${boundedMomentum.toFixed(2)} Age=${trendAge}`, consistencyPct: emaConsistency, volLevelPct: emaVol, goodTrade };
   }
 
   function evaluateEvenOdd() {
-    // Analysis window removed; use full history
+    // Simplified: recent parity distribution with simple streak adjustment
     const need = digitHistory.length;
-    const have = digitHistory.length;
-    if (!SUPPORTED.DIGITS.has(activeSymbol) || digitHistory.length < 5)
-      return {
-        confidence: 0, tradeType: null, parity: null, reason: "Waiting for parity context",
-        evenPct: 0, oddPct: 0, evenCount: 0, oddCount: 0, digitCounts: Array(10).fill(0), goodTrade: false, lastRun: 0, lastParity: "EVEN", evidenceStrength: 0
-      };
+    if (!SUPPORTED.DIGITS.has(activeSymbol) || need < 5)
+      return { confidence: 0, tradeType: null, parity: null, reason: "Waiting for parity context", evenPct: 0, oddPct: 0, evenCount: 0, oddCount: 0, digitCounts: Array(10).fill(0), goodTrade: false, lastRun: 0, lastParity: "EVEN", evidenceStrength: 0 };
 
-    const W = Math.min(need, digitHistory.length);
+    const W = Math.min(40, need);
     const slice = digitHistory.slice(-W);
-    const paritySeq = slice.map(d => d % 2 === 0 ? "E" : "O");
-
-    const evenCount = paritySeq.filter(p => p === "E").length;
+    const paritySeq = slice.map(d => d % 2 === 0 ? 'E' : 'O');
+    const evenCount = paritySeq.filter(p => p === 'E').length;
     const oddCount = paritySeq.length - evenCount;
     const evenPct = (evenCount / paritySeq.length) * 100;
     const oddPct = 100 - evenPct;
+    const digitCounts = Array(10).fill(0); slice.forEach(d => digitCounts[d]++);
 
-    const digitCounts = Array(10).fill(0);
-    slice.forEach(d => digitCounts[d]++);
+    // Last run
+    let lastRun = 1; for (let i = paritySeq.length - 2; i >= 0; i--) { if (paritySeq[i] === paritySeq[i + 1]) lastRun++; else break; }
+    const lastParityRaw = paritySeq[paritySeq.length - 1];
 
-    function markov(o) {
-      if (paritySeq.length <= o) return { pE: 0.5, pO: 0.5, count: 0 };
-      const key = paritySeq.slice(-o).join(",");
-      let e = 0, oC = 0, count = 0;
-      for (let i = 0; i <= paritySeq.length - o - 1; i++) {
-        const seg = paritySeq.slice(i, i + o).join(",");
-        if (seg === key) {
-          count++;
-          const nxt = paritySeq[i + o];
-          if (nxt === "E") e++; else oC++;
-        }
-      }
-      return { pE: count ? e / count : 0.5, pO: count ? oC / count : 0.5, count };
-    }
-
-    const m2 = markov(2), m3 = markov(3), m4 = markov(4);
-    const weight = (c) => Math.pow(c, 0.9);
-    const w2 = weight(m2.count), w3 = weight(m3.count), w4 = weight(m4.count * 1.15);
-    const pE_markov = (m2.pE * w2 + m3.pE * w3 + m4.pE * w4) / ((w2 + w3 + w4) || 1);
-
-    let currRun = 1, runs = [];
-    for (let i = 1; i < paritySeq.length; i++) {
-      if (paritySeq[i] === paritySeq[i - 1]) currRun++;
-      else { runs.push(currRun); currRun = 1; }
-    }
-    runs.push(currRun);
-    const lastRun = currRun;
-    const lastParityRaw = paritySeq[paritySeq.length - 1]; // 'E' or 'O'
-    const avgRun = runs.reduce((a, b) => a + b, 0) / (runs.length || 1);
-
-    const continuationBias = avgRun > 2.4 ? 1 : 0;
-    let streakComponent = 0;
-    if (continuationBias) streakComponent = (lastRun > 2 ? 0.06 : 0.03);
-    else { if (lastRun >= 3) streakComponent = -0.07; if (lastRun >= 4) streakComponent = -0.12; }
-
-    let pE = pE_markov;
-    if (evenPct > 55) pE += 0.05;
-    else if (evenPct < 45) pE -= 0.05;
-    if (lastParityRaw === "E") pE += streakComponent; else pE -= streakComponent;
-
+    // Dominant parity and base probability
+    let pE = evenCount / Math.max(1, paritySeq.length);
+    // Streak adjustment: long same-parity streak reduces confidence in continuation
+    if (lastRun >= 4) pE += (lastParityRaw === 'E' ? -0.06 : 0.06);
     pE = clamp(pE, 0.02, 0.98);
     const pO = 1 - pE;
-    const parity = (pO > pE) ? "ODD" : "EVEN";
+    const parity = (pO > pE) ? 'ODD' : 'EVEN';
+    const dominant = parity === 'EVEN' ? pE : pO;
 
-    const maxProb = Math.max(pE, pO);
-    const evidenceStrength = m2.count + m3.count + m4.count;
+    // Confidence from separation from 50%
+    let confidence = clamp(Math.round((Math.max(0, dominant - 0.5) / 0.5) * 100), 0, 98);
+    const evidenceStrength = paritySeq.length;
+    if (evidenceStrength < 10) confidence = Math.min(confidence, 78);
 
-    const pDom = maxProb;
-    const entropy = - (pDom * Math.log2(pDom) + (1 - pDom) * Math.log2(1 - pDom));
-    const separation = (maxProb - 0.5) * 200;
-  let confidence = logistic(separation, 15, 6) * 100;
-  if (evidenceStrength < 3) confidence = Math.min(confidence, 78);
-  if (evidenceStrength < 2) confidence = Math.min(confidence, 68);
-    const entropyFactor = 1 - Math.min(0.30, entropy * 0.30);
-    confidence = clamp(Math.round(confidence * entropyFactor), 0, 98);
+    const goodTrade = (confidence >= 88) && (evidenceStrength >= 20) && (dominant >= 0.58);
+    const reason = `Parity=${parity} (${(dominant * 100).toFixed(1)}%) | Streak=${lastRun} ${lastParityRaw === 'E' ? 'EVEN' : 'ODD'} | Dist E=${evenPct.toFixed(1)}% O=${oddPct.toFixed(1)}% | N=${evidenceStrength}`;
 
-  const goodTrade = (confidence >= 88) && (evidenceStrength >= 4) && (maxProb >= 0.58);
-    const dominant = parity === "EVEN" ? pE : pO;
-
-    const reason = `Parity=${parity} (${(dominant * 100).toFixed(1)}%) | Streak=${lastRun} ${lastParityRaw === "E" ? "EVEN" : "ODD"} | Dist E=${evenPct.toFixed(1)}% O=${oddPct.toFixed(1)}% | Evidence=${evidenceStrength} | Entropy=${entropy.toFixed(2)}`;
-
-    return {
-      confidence, tradeType: "EVENODD", parity, reason,
-      evenPct, oddPct, evenCount, oddCount, digitCounts,
-      goodTrade, lastRun, lastParity: lastParityRaw === "E" ? "EVEN" : "ODD", evidenceStrength
-    };
+    return { confidence, tradeType: 'EVENODD', parity, reason, evenPct, oddPct, evenCount, oddCount, digitCounts, goodTrade, lastRun, lastParity: lastParityRaw === 'E' ? 'EVEN' : 'ODD', evidenceStrength };
   }
 
   // Strike Pro evaluation
   function evaluateStrikePro() {
-    // Analysis window removed; use full history
+    // Simplified: recent OU probabilities + EMA direction coherence
     const need = digitHistory.length;
-    const haveD = digitHistory.length, haveP = priceHistory.length;
-    if (!SUPPORTED.DIGITS.has(activeSymbol) || digitHistory.length < 10 || priceHistory.length < 8) {
-      return {
-        confidence: 0, tradeType: null, outcome: null, direction: null,
-        reason: "Waiting for OU/Direction context", ouProbPct: 0, dirConfPct: 0, goodTrade: false
-      };
+    if (!SUPPORTED.DIGITS.has(activeSymbol) || need < 10 || priceHistory.length < 8) {
+      return { confidence: 0, tradeType: null, outcome: null, direction: null, reason: "Waiting for OU/Direction context", ouProbPct: 0, dirConfPct: 0, goodTrade: false };
     }
 
-    const W = Math.min(Math.max(need, 30), digitHistory.length);
+    const W = Math.min(50, need);
     const slice = digitHistory.slice(-W);
-
-    const countOver1 = slice.filter(d => d >= 2 && d <= 9).length;
-    const countUnder9 = slice.filter(d => d >= 0 && d <= 8).length;
-    const pOver1_emp = countOver1 / W;
-    const pUnder9_emp = countUnder9 / W;
-
-    const pOver1_base = 0.8;
-    const pUnder9_base = 0.9;
-
-    const Wshort = Math.min(30, slice.length);
-    const recent = slice.slice(-Wshort);
-    const pOver1_recent = recent.filter(d => d >= 2).length / Math.max(1, recent.length);
-    const pUnder9_recent = recent.filter(d => d <= 8).length / Math.max(1, recent.length);
-
-    let pOver1 = 0.3 * pOver1_base + 0.4 * pOver1_emp + 0.3 * pOver1_recent;
-    let pUnder9 = 0.3 * pUnder9_base + 0.4 * pUnder9_emp + 0.3 * pUnder9_recent;
-
-    const lastD = digitHistory[digitHistory.length - 1];
-    if (lastD === 9) pUnder9 += 0.02;
-    if (lastD === 0) pOver1 += 0.015;
-    pOver1 = clamp(pOver1, 0.02, 0.98);
-    pUnder9 = clamp(pUnder9, 0.02, 0.98);
+    const pOver1 = slice.filter(d => d >= 2).length / Math.max(1, slice.length);
+    const pUnder9 = slice.filter(d => d <= 8).length / Math.max(1, slice.length);
 
     if (emaFastPrice == null || emaSlowPrice == null || prevEmaFast == null || prevEmaSlow == null) {
       return { confidence: 0, tradeType: null, outcome: null, direction: null, reason: "Initializing trend components", ouProbPct: 0, dirConfPct: 0, goodTrade: false };
@@ -1051,58 +923,37 @@
     const slopeFast = emaFastPrice - prevEmaFast;
     const slopeSlow = emaSlowPrice - prevEmaSlow;
     const coherent = Math.sign(slopeFast) === Math.sign(slopeSlow);
-    const dir = coherent ? (slopeFast >= 0 ? "RISE" : "FALL") : (emaMomentum >= 0 ? "RISE" : "FALL");
+    const dir = (slopeFast >= 0 && slopeSlow >= 0) ? 'RISE' : (slopeFast <= 0 && slopeSlow <= 0 ? 'FALL' : (emaMomentum >= 0 ? 'RISE' : 'FALL'));
 
     const deltas = [];
     for (let i = 1; i < priceHistory.length; i++) deltas.push(priceHistory[i] - priceHistory[i - 1]);
     const absD = deltas.map(Math.abs);
     const medAbs = median(absD) || 1e-6;
     const boundedMomentum = clamp(Math.abs(emaMomentum) / (medAbs || 1e-6) / 4, 0, 1);
-    let dirConf = 0.55 * (coherent ? 1 : 0.6) + 0.45 * boundedMomentum;
+    let dirConf = 0.6 * (coherent ? 1 : 0.6) + 0.4 * boundedMomentum;
     dirConf = clamp(dirConf, 0, 1);
 
-    const outcome = pOver1 >= pUnder9 ? "OVER1" : "UNDER9";
+    const outcome = pOver1 >= pUnder9 ? 'OVER1' : 'UNDER9';
     const ouProb = Math.max(pOver1, pUnder9);
-    const ouProbPct = ouProb * 100;
-    const dirConfPct = dirConf * 100;
+    let conf = 0.6 * ((ouProb - 0.5) / 0.5 * 100) + 0.4 * (dirConf * 100);
+    conf = clamp(conf, 0, 98);
 
-    const sep = (ouProb - 0.5) * 200;
-  let conf = logistic(sep, 14, 6) * 100;
-    conf = 0.55 * conf + 0.45 * (dirConf * 100);
-
-    const synergy = (dir === "RISE" && outcome === "OVER1") || (dir === "FALL" && outcome === "UNDER9");
-    if (synergy) conf = Math.min(98, conf + 6);
+    const synergy = (dir === 'RISE' && outcome === 'OVER1') || (dir === 'FALL' && outcome === 'UNDER9');
+    if (synergy) conf = Math.min(98, conf + 5);
 
     const drift = computeDriftMetrics();
-    if (drift.pattern === "CLUSTERING" && drift.strength >= 70) conf = Math.max(0, conf - 6);
+    if (drift.pattern === 'CLUSTERING' && drift.strength >= 70) conf = Math.max(0, conf - 6);
 
-    // Stable market trend integration — small but meaningful adjustment
-    if (outcome === "OVER1") {
-      if (stableTrend === "UP") conf = Math.min(98, conf + 3);
-      if (stableTrend === "DOWN") conf = Math.max(0, conf - 5);
-    } else { // UNDER9
-      if (stableTrend === "DOWN") conf = Math.min(98, conf + 3);
-      if (stableTrend === "UP") conf = Math.max(0, conf - 5);
-    }
+    // Trend nudges
+    if (outcome === 'OVER1') { if (stableTrend === 'UP') conf = Math.min(98, conf + 2); if (stableTrend === 'DOWN') conf = Math.max(0, conf - 4); }
+    else { if (stableTrend === 'DOWN') conf = Math.min(98, conf + 2); if (stableTrend === 'UP') conf = Math.max(0, conf - 4); }
 
+    const ouProbPct = ouProb * 100;
+    const dirConfPct = dirConf * 100;
     const goodTrade = synergy && conf >= CONFIG.STRIKEPRO_EXCELLENT_CONF;
+    const reason = `OU=${outcome === 'OVER1' ? 'OVER 1' : 'UNDER 9'} (${ouProbPct.toFixed(1)}%) • Dir=${dir} (${dirConfPct.toFixed(1)}%) | Coherent=${coherent?1:0} | Drift=${drift.pattern}/${drift.strength}% | Trend=${getStableTrendDisplay().text}`;
 
-    const reason =
-      `OU=${outcome === "OVER1" ? "OVER 1" : "UNDER 9"} (${ouProbPct.toFixed(1)}%) • Dir=${dir} (${dirConfPct.toFixed(1)}%)` +
-      ` | Coherent=${coherent ? 1 : 0} Mom=${boundedMomentum.toFixed(2)} | Drift=${drift.pattern}/${drift.strength}%` +
-      (synergy ? " | Synergy ✓" : "") + ` | Trend=${getStableTrendDisplay().text}`;
-
-    return {
-      confidence: Math.round(clamp(conf, 0, 98)),
-      tradeType: "STRIKEPRO",
-      outcome,
-      direction: dir,
-      reason,
-      ouProbPct,
-      dirConfPct,
-      goodTrade,
-      synergy
-    };
+    return { confidence: Math.round(conf), tradeType: 'STRIKEPRO', outcome, direction: dir, reason, ouProbPct, dirConfPct, goodTrade, synergy };
   }
 
   /* ===========================================================================
