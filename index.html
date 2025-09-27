@@ -18,6 +18,17 @@
   </script>
   <!-- Supabase JS v2 (add crossorigin so errors aren't masked as "Script error.") -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
+  <!-- Enable backend proxy automatically on Render before app script loads -->
+  <script>
+    (function () {
+      try {
+        if (/onrender\.com$/.test(location.hostname)) {
+          window.BACKEND_PROXY = true;
+          window.API_BASE = '';
+        }
+      } catch {}
+    })();
+  </script>
   <script>
     // Surface runtime errors to the Activity Log with smarter filtering
     (function () {
@@ -629,17 +640,5 @@
   </script>
 
   <script src="script.js"></script>
-  <script>
-    // When hosted on Render (single Node service), route API via the backend proxy
-    // so the frontend talks to REST/SSE endpoints on the same origin.
-    (function () {
-      try {
-        if (/onrender\.com$/.test(location.hostname)) {
-          window.BACKEND_PROXY = true;
-          window.API_BASE = '';
-        }
-      } catch {}
-    })();
-  </script>
 </body>
 </html>

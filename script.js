@@ -313,6 +313,9 @@
   // Auto trade planning counters
   let autoTradesPlanned = 1;
   let autoTradesDone = 0;
+  // Burst and sequential plan state
+  let burstActive = null; // { barrier, target, sent, epoch, expiresAt, stakeFallback }
+  let seqPlan = null;     // { remaining, stopOnLoss, awaitingTick, waitEpoch }
 
   // Strategy switches
   let useAccumulator = false;
@@ -415,6 +418,12 @@
   const fmt2c = (v) => `${accountCurrency} ${fmt2(v)}`;
   const nowLocal = () => new Date().toLocaleTimeString();
   const logistic = (x, mid = 50, scale = 12) => 1 / (1 + Math.exp(-(x - mid) / scale));
+  // Exponential moving average helper: prev -> previous EMA value (or null),
+  // x -> current sample, a -> smoothing factor in (0,1]
+  function EMA(prev, x, a) {
+    if (prev == null || !Number.isFinite(prev)) return x;
+    return prev * (1 - a) + x * a;
+  }
   const median = (arr) => {
     if (!arr.length) return 0;
     const s = [...arr].sort((a, b) => a - b);

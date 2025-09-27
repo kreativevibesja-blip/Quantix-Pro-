@@ -55,7 +55,7 @@ function getLimiter(sessionId, key) {
     // Defaults tuned to be conservative; adjust via env if needed
     const defaults = {
       proposals: { capacity: 6, refillPerSec: 3 }, // up to ~3/sec sustained, burst 6
-      buys: { capacity: 3, refillPerSec: 2 },      // ~2/sec sustained, burst 3
+      buys: { capacity: 4, refillPerSec: 3 },      // allow 3x burst comfortably
       sells: { capacity: 3, refillPerSec: 2 },     // similar to buys
       subscribe: { capacity: 1, refillPerSec: 0.5 } // one every 2s
     };
