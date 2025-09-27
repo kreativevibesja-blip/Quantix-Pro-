@@ -33,7 +33,7 @@
 
     // Money & thresholds
     MIN_STAKE: 0.35,
-  CONFIDENCE_THRESHOLD: 82,
+  CONFIDENCE_THRESHOLD: 80,
     MAX_LOSS_STREAK: 3,
 
     // Observational buffers (ticks, prices)
@@ -60,7 +60,7 @@
 
     // Strike Pro thresholds and cooldown
     STRIKEPRO_AUTO_MIN_INTERVAL_MS: 3000,
-    STRIKEPRO_MIN_CONFIDENCE: 82,   // lowered from 85 per request
+  STRIKEPRO_MIN_CONFIDENCE: 80,
     STRIKEPRO_GOOD_CONF: 85,
     STRIKEPRO_EXCELLENT_CONF: 90,
     // Fast buy from cached proposals to minimize latency
@@ -157,6 +157,13 @@
   const strikePlaceTradeBtn = $("strikePlaceTradeBtn");
   const strikePlaceOverBtn = $("strikePlaceOverBtn");
   const strikePlaceUnderBtn = $("strikePlaceUnderBtn");
+  // Strike Pro barrier controls
+  const strikeBarrierGroup = $("strikeBarrierGroup");
+  const strikeBarrierInput = $("strikeBarrier");
+  const strikeBarrierLabel = $("strikeBarrierLabel");
+  const strikeBarrierLabel2 = $("strikeBarrierLabel2");
+  const strikeBarrierLabel3 = $("strikeBarrierLabel3");
+  const strikeBarrierLabel4 = $("strikeBarrierLabel4");
 
   // Strategy toggles
   const toggleAccumulator = $("toggleAccumulator");
@@ -343,6 +350,8 @@
 
   // Strike Pro cooldown
   let lastStrikeTs = 0;
+  // Strike Pro barrier (0-9), default 1
+  let strikeBarrier = 1;
 
   // Trend/EMA state
   let emaFastPrice = null, emaSlowPrice = null, prevEmaFast = null, prevEmaSlow = null;
@@ -445,6 +454,13 @@
   function EMA(prev, x, a) {
     if (prev == null || !Number.isFinite(prev)) return x;
     return prev * (1 - a) + x * a;
+  }
+  // Map a probability p in [0.5, 1] to a stronger, more actionable confidence in [0, 98].
+  // hi controls how quickly confidence ramps to near-maximum (e.g., hi = 0.60 → 60% maps near ~98).
+  function probToConfidence(p, base = 55, hi = 0.60) {
+    if (!(p > 0.5)) return 0;
+    const t = (p - 0.5) / Math.max(1e-6, (hi - 0.5));
+    return clamp(Math.round(base + t * (98 - base)), 0, 98);
   }
   const median = (arr) => {
     if (!arr.length) return 0;
@@ -609,9 +625,9 @@
   function advancedQualityGate(strategyKey) {
     // Core idea: confirm with EV advantage and avoid extreme RSI or ultra-low volatility for trend strategies
     if (!CONFIG.USE_EV_FILTER) return { ok: true, reason: "EV off" };
-    let ct; if (strategyKey === 'Z') ct = 'DIGITDIFF';
-    else if (strategyKey === 'EO') ct = (lastEval.eo?.parity === 'EVEN' ? 'DIGITEVEN' : 'DIGITODD');
-    else if (strategyKey === 'SP') ct = (lastEval.strike?.outcome === 'OVER1' ? 'DIGITOVER' : 'DIGITUNDER');
+  let ct; if (strategyKey === 'Z') ct = 'DIGITDIFF';
+  else if (strategyKey === 'EO') ct = (lastEval.eo?.parity === 'EVEN' ? 'DIGITEVEN' : 'DIGITODD');
+  else if (strategyKey === 'SP') ct = (lastEval.strike?.outcome === 'OVER' ? 'DIGITOVER' : 'DIGITUNDER');
     else if (strategyKey === 'ACCU') ct = 'ACCU';
 
     // EV: use latest cached ask/payout if available through proposal caches
@@ -621,8 +637,14 @@
       const c = proposalCache.get(b); ask = c?.ask; payout = c?.payout;
     } else if (ct === 'DIGITEVEN') { const c = eoProposalCache.get('EVEN'); ask = c?.ask; payout = c?.payout; }
     else if (ct === 'DIGITODD') { const c = eoProposalCache.get('ODD'); ask = c?.ask; payout = c?.payout; }
-    else if (ct === 'DIGITOVER') { const c = strikeProposalCache.get('OVER1'); ask = c?.ask; payout = c?.payout; }
-    else if (ct === 'DIGITUNDER') { const c = strikeProposalCache.get('UNDER9'); ask = c?.ask; payout = c?.payout; }
+    else if (ct === 'DIGITOVER') {
+      const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+      const c = strikeProposalCache.get(`OVER${B}`); ask = c?.ask; payout = c?.payout;
+    }
+    else if (ct === 'DIGITUNDER') {
+      const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+      const c = strikeProposalCache.get(`UNDER${B}`); ask = c?.ask; payout = c?.payout;
+    }
 
     const pImp = impliedProb(ask, payout);
     const pModel = modelProbFor(ct);
@@ -925,8 +947,8 @@
     const differsProb = pDiff * 100;
     const stickyPct = Math.round(100 - differsProb);
 
-    // Confidence from separation from 50%; cap and adjust by drift
-    let confidence = clamp(Math.round((Math.max(0, differsProb - 50) / 50) * 100), 0, 98);
+    // Confidence: direct mapping from probability for more frequent signals
+    let confidence = probToConfidence(pDiff, 60, 0.62);
     const drift = computeDriftMetrics();
     if (drift.pattern === 'CLUSTERING' && drift.strength >= 60 && lastOutcome === 'M') confidence = Math.max(0, confidence - 10);
     // Synergy bumps: alternating drift or ranging trend with decent separation
@@ -943,7 +965,7 @@
       confidence = Math.min(98, confidence + 2); // digits tend to be more balanced in ranging
     }
 
-    const goodTrade = (confidence >= 90) && (differsProb >= 60) && !(drift.pattern === 'CLUSTERING' && drift.strength >= 75);
+  const goodTrade = (confidence >= 88) && (differsProb >= 58) && !(drift.pattern === 'CLUSTERING' && drift.strength >= 75);
 
     return {
       confidence,
@@ -1043,8 +1065,8 @@
     const parity = (pO > pE) ? 'ODD' : 'EVEN';
     const dominant = parity === 'EVEN' ? pE : pO;
 
-  // Confidence from separation from 50%
-  let confidence = clamp(Math.round((Math.max(0, dominant - 0.5) / 0.5) * 100), 0, 98);
+  // Confidence: stronger mapping from dominant proportion
+  let confidence = probToConfidence(dominant, 58, 0.62);
     const evidenceStrength = paritySeq.length;
     if (evidenceStrength < 10) confidence = Math.min(confidence, 78);
 
@@ -1065,7 +1087,7 @@
     if (coherent && volModerate && dominant >= 0.55) { confidence = Math.min(98, confidence + 2); synergy = true; }
   }
 
-    const goodTrade = (confidence >= 88) && (evidenceStrength >= 20) && (dominant >= 0.58);
+  const goodTrade = (confidence >= 86) && (evidenceStrength >= 16) && (dominant >= 0.56);
     const reason = `Parity=${parity} (${(dominant * 100).toFixed(1)}%) | Streak=${lastRun} ${lastParityRaw === 'E' ? 'EVEN' : 'ODD'} | Dist E=${evenPct.toFixed(1)}% O=${oddPct.toFixed(1)}% | N=${evidenceStrength}${synergy ? ' • Synergy' : ''}`;
 
     return { confidence, tradeType: 'EVENODD', parity, reason, evenPct, oddPct, evenCount, oddCount, digitCounts, goodTrade, lastRun, lastParity: lastParityRaw === 'E' ? 'EVEN' : 'ODD', evidenceStrength, synergy };
@@ -1079,10 +1101,12 @@
       return { confidence: 0, tradeType: null, outcome: null, direction: null, reason: "Waiting for OU/Direction context", ouProbPct: 0, dirConfPct: 0, goodTrade: false };
     }
 
-    const W = Math.min(50, need);
-    const slice = digitHistory.slice(-W);
-    const pOver1 = slice.filter(d => d >= 2).length / Math.max(1, slice.length);
-    const pUnder9 = slice.filter(d => d <= 8).length / Math.max(1, slice.length);
+  const W = Math.min(50, need);
+  const slice = digitHistory.slice(-W);
+  // Dynamic barrier B: Over means next digit > B; Under means next digit < B
+  const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+  const pOverB = slice.filter(d => d > B).length / Math.max(1, slice.length);
+  const pUnderB = slice.filter(d => d < B).length / Math.max(1, slice.length);
 
     if (emaFastPrice == null || emaSlowPrice == null || prevEmaFast == null || prevEmaSlow == null) {
       return { confidence: 0, tradeType: null, outcome: null, direction: null, reason: "Initializing trend components", ouProbPct: 0, dirConfPct: 0, goodTrade: false };
@@ -1100,27 +1124,28 @@
     let dirConf = 0.6 * (coherent ? 1 : 0.6) + 0.4 * boundedMomentum;
     dirConf = clamp(dirConf, 0, 1);
 
-    const outcome = pOver1 >= pUnder9 ? 'OVER1' : 'UNDER9';
-    const ouProb = Math.max(pOver1, pUnder9);
-    let conf = 0.6 * ((ouProb - 0.5) / 0.5 * 100) + 0.4 * (dirConf * 100);
-    conf = clamp(conf, 0, 98);
+  const outcome = pOverB >= pUnderB ? 'OVER' : 'UNDER';
+  const ouProb = Math.max(pOverB, pUnderB);
+    // Combine OU probability with direction coherence, then map assertively
+    const blended = clamp(0.65 * ouProb + 0.35 * dirConf, 0.5, 0.99);
+    let conf = probToConfidence(blended, 60, 0.62);
 
-  const synergy = (dir === 'RISE' && outcome === 'OVER1') || (dir === 'FALL' && outcome === 'UNDER9');
+  const synergy = (dir === 'RISE' && outcome === 'OVER') || (dir === 'FALL' && outcome === 'UNDER');
   if (synergy) conf = Math.min(98, conf + 5);
 
     const drift = computeDriftMetrics();
     if (drift.pattern === 'CLUSTERING' && drift.strength >= 70) conf = Math.max(0, conf - 6);
 
     // Trend nudges
-  if (outcome === 'OVER1') { if (stableTrend === 'UP') conf = Math.min(98, conf + 3); if (stableTrend === 'DOWN') conf = Math.max(0, conf - 4); }
+  if (outcome === 'OVER') { if (stableTrend === 'UP') conf = Math.min(98, conf + 3); if (stableTrend === 'DOWN') conf = Math.max(0, conf - 4); }
   else { if (stableTrend === 'DOWN') conf = Math.min(98, conf + 3); if (stableTrend === 'UP') conf = Math.max(0, conf - 4); }
 
     const ouProbPct = ouProb * 100;
     const dirConfPct = dirConf * 100;
-    const goodTrade = synergy && conf >= CONFIG.STRIKEPRO_EXCELLENT_CONF;
-    const reason = `OU=${outcome === 'OVER1' ? 'OVER 1' : 'UNDER 9'} (${ouProbPct.toFixed(1)}%) • Dir=${dir} (${dirConfPct.toFixed(1)}%) | Coherent=${coherent?1:0} | Drift=${drift.pattern}/${drift.strength}% | Trend=${getStableTrendDisplay().text}`;
+  const goodTrade = synergy && conf >= Math.max(90, CONFIG.STRIKEPRO_MIN_CONFIDENCE);
+    const reason = `OU=${outcome} ${B} (${ouProbPct.toFixed(1)}%) • Dir=${dir} (${dirConfPct.toFixed(1)}%) | Coherent=${coherent?1:0} | Drift=${drift.pattern}/${drift.strength}% | Trend=${getStableTrendDisplay().text}`;
 
-    return { confidence: Math.round(conf), tradeType: 'STRIKEPRO', outcome, direction: dir, reason, ouProbPct, dirConfPct, goodTrade, synergy };
+    return { confidence: Math.round(conf), tradeType: 'STRIKEPRO', outcome, direction: dir, reason, ouProbPct, dirConfPct, goodTrade, synergy, barrier: B };
   }
 
   /* ===========================================================================
@@ -1327,7 +1352,7 @@
         proposalCache.set(req.barrier, { ...prev, stake: req.amount });
       }
       if (opts.simulBurst && (contract_type === "DIGITOVER" || contract_type === "DIGITUNDER")) {
-        const key = contract_type === "DIGITOVER" ? "OVER1" : "UNDER9";
+        const key = `${contract_type === "DIGITOVER" ? 'OVER' : 'UNDER'}${req.barrier ?? ''}`;
         const prev = strikeProposalCache.get(key) || {};
         strikeProposalCache.set(key, { ...prev, stake: req.amount });
       }
@@ -1583,31 +1608,32 @@
         }
       });
 
-      // DIGITOVER (1) / DIGITUNDER (9)
-      // OVER/UNDER proposals — only when Strike Pro is enabled
-      [
-        { ct: "DIGITOVER", key: "OVER1", barrier: "1" },
-        { ct: "DIGITUNDER", key: "UNDER9", barrier: "9" }
-      ].forEach(({ ct, key, barrier }) => {
-        if (!useStrikePro) return;
-        const c = strikeProposalCache.get(key);
-        const f = c && now - (c.ts || 0) <= CONFIG.PROPOSAL_CACHE_MS;
-        if (!f && !strikeProposalInFlight.get(key) && canRequestProposalNow(ct, "*")) {
-          strikeProposalInFlight.set(key, true);
-          wsSend({
-            proposal: 1,
-            amount: Number(stake.toFixed(2)),
-            basis: "stake",
-            contract_type: ct,
-            currency: accountCurrency,
-            duration: 1,
-            duration_unit: "t",
-            symbol: activeSymbol,
-            barrier
-          });
-          markProposalSent(ct, "*");
-        }
-      });
+      // DIGITOVER/UNDER with dynamic barrier
+      if (useStrikePro) {
+        const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+        [true, false].forEach((isOver) => {
+          const ct = isOver ? "DIGITOVER" : "DIGITUNDER";
+          const key = `${isOver ? 'OVER' : 'UNDER'}${B}`;
+          const barrier = String(B);
+          const c = strikeProposalCache.get(key);
+          const f = c && now - (c.ts || 0) <= CONFIG.PROPOSAL_CACHE_MS;
+          if (!f && !strikeProposalInFlight.get(key) && canRequestProposalNow(ct, "*")) {
+            strikeProposalInFlight.set(key, true);
+            wsSend({
+              proposal: 1,
+              amount: Number(stake.toFixed(2)),
+              basis: "stake",
+              contract_type: ct,
+              currency: accountCurrency,
+              duration: 1,
+              duration_unit: "t",
+              symbol: activeSymbol,
+              barrier
+            });
+            markProposalSent(ct, "*");
+          }
+        });
+      }
     }
 
   // Keep tick movement live for any enabled strategy (including Z Trade)
@@ -1741,7 +1767,7 @@
       const excellent = eoEval.confidence >= 95 || eoEval.goodTrade;
       const adv = advancedQualityGate('EO');
       const evidenceOK = (eoEval.evidenceStrength || 0) >= 4 && (eoEval.lastRun || 0) <= 4;
-      if (intervalOK && confidenceOK && evidenceOK) {
+  if (intervalOK && confidenceOK && evidenceOK) {
         if (reversal && !(excellent && adv.ok)) {
           log(`Auto Flip X skipped: streak reversal (${adv.ok ? 'quality OK' : adv.reason}).`, 'loss');
         } else {
@@ -1770,14 +1796,15 @@
         if (reversal && !(excellent && adv.ok)) {
           log(`Auto Strike Pro skipped: streak reversal (${adv.ok ? 'quality OK' : adv.reason}).`, 'loss');
         } else {
-        if (strikeEval.outcome === "OVER1") {
+        const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+        if (strikeEval.outcome === "OVER") {
           autoAdjustSymbolForStrategy("DIGITOVER");
           let didFast = false;
           if (CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE) {
-            didFast = strikeBuyImmediateIfCached("OVER1");
+            didFast = strikeBuyImmediateIfCached("OVER");
           }
           if (!didFast) {
-            requestProposal("DIGITOVER", { barrier: "1", buyQty: 1 });
+            requestProposal("DIGITOVER", { barrier: String(B), buyQty: 1 });
           }
           ticksSinceLastTrade = 0;
           lastStrikeTs = nowTs;
@@ -1785,10 +1812,10 @@
           autoAdjustSymbolForStrategy("DIGITUNDER");
           let didFast = false;
           if (CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE) {
-            didFast = strikeBuyImmediateIfCached("UNDER9");
+            didFast = strikeBuyImmediateIfCached("UNDER");
           }
           if (!didFast) {
-            requestProposal("DIGITUNDER", { barrier: "9", buyQty: 1 });
+            requestProposal("DIGITUNDER", { barrier: String(B), buyQty: 1 });
           }
           ticksSinceLastTrade = 0;
           lastStrikeTs = nowTs;
@@ -1812,8 +1839,8 @@
   }
 
   function strengthFromConf(c) {
-    if (c >= 97) return { label: "EXCELLENT", cls: "excellent" };
-    if (c >= 90) return { label: "STRONG", cls: "strong" };
+    if (c >= 95) return { label: "EXCELLENT", cls: "excellent" };
+    if (c >= 88) return { label: "STRONG", cls: "strong" };
     if (c >= CONFIG.CONFIDENCE_THRESHOLD) return { label: "MODERATE", cls: "moderate" };
     return { label: "WEAK", cls: "weak" };
   }
@@ -1884,9 +1911,9 @@
       const pct = strikeEval.ouProbPct || 0;
       fiboGaugeFill.style.width = `${clamp(pct, 0, 100)}%`;
       fiboGaugePct.textContent = `${pct.toFixed(1)}%`;
-      const expOU = strikeEval.outcome === "OVER1" ? "OVER 1" : "UNDER 9";
+      const expOU = `${strikeEval.outcome} ${strikeEval.barrier}`;
       fiboExpectedEl.textContent = expOU;
-      fiboExpectedEl.className = `expected-value ${strikeEval.outcome === "OVER1" ? "exp-diff" : "exp-match"}`;
+      fiboExpectedEl.className = `expected-value ${strikeEval.outcome === "OVER" ? "exp-diff" : "exp-match"}`;
       if (fiboDirExpectedEl) fiboDirExpectedEl.textContent = strikeEval.direction || "—";
     }
 
@@ -2178,9 +2205,10 @@
     if (maxLossStreakInput) maxLossStreakInput.disabled = lock;
     if (autoTradeCountInput) autoTradeCountInput.disabled = lock || !strategyOn;
 
-    if (strikePlaceTradeBtn) strikePlaceTradeBtn.disabled = placingTrade || !useStrikePro;
-    if (strikePlaceOverBtn) strikePlaceOverBtn.disabled = placingTrade || !useStrikePro;
-    if (strikePlaceUnderBtn) strikePlaceUnderBtn.disabled = placingTrade || !useStrikePro;
+  if (strikePlaceTradeBtn) strikePlaceTradeBtn.disabled = placingTrade || !useStrikePro;
+  if (strikePlaceOverBtn) strikePlaceOverBtn.disabled = placingTrade || !useStrikePro;
+  if (strikePlaceUnderBtn) strikePlaceUnderBtn.disabled = placingTrade || !useStrikePro;
+  if (strikeBarrierInput) strikeBarrierInput.disabled = placingTrade || !useStrikePro;
   }
 
   function updatePanelVisibility() {
@@ -2193,7 +2221,8 @@
     if (flipxDelayGroup) flipxDelayGroup.classList.toggle("hidden", !showEO);
 
     if (panelAccuSettings) panelAccuSettings.classList.toggle("hidden", !(useAccumulator || !!openAccuId));
-    if (panelAccuMarket) panelAccuMarket.classList.toggle("hidden", !useAccumulator);
+  if (panelAccuMarket) panelAccuMarket.classList.toggle("hidden", !useAccumulator);
+  if (strikeBarrierGroup) strikeBarrierGroup.classList.toggle("hidden", !useStrikePro);
   // Show Recent Tick Movement when any strategy is on (Bolt, Z Trade, Flip X, or Strike Pro)
   if (panelTickMovement) panelTickMovement.classList.toggle("hidden", !useAccumulator && !useDiffersVsLast && !useEvenOdd && !useStrikePro);
 
@@ -2248,7 +2277,16 @@
     updateOutcomesUI();
     updateDriftUI();
     updateEvenOddPanel(lastEvenOddEval);
+    updateStrikeBarrierLabels();
     saveSettings();
+  }
+
+  function updateStrikeBarrierLabels() {
+    const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+    if (strikeBarrierLabel) strikeBarrierLabel.textContent = String(B);
+    if (strikeBarrierLabel2) strikeBarrierLabel2.textContent = String(B);
+    if (strikeBarrierLabel3) strikeBarrierLabel3.textContent = String(B);
+    if (strikeBarrierLabel4) strikeBarrierLabel4.textContent = String(B);
   }
 
   /* ===========================================================================
@@ -2279,14 +2317,17 @@
     requestProposal(ct, { barrier, buyQty: 1 });
   }
   // Fast buy from cached proposal for Strike Pro to reduce latency
-  function strikeBuyImmediateIfCached(key = "OVER1") {
+  function strikeBuyImmediateIfCached(keyBase = "OVER") {
+    const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+    const key = `${keyBase}${B}`;
     const cached = strikeProposalCache.get(key);
     const fresh = cached && cached.id && (Date.now() - (cached.ts || 0) <= CONFIG.PROPOSAL_CACHE_MS);
     const priceToUse = Number((cached?.ask ?? Math.max(CONFIG.MIN_STAKE, Number(stakeInput?.value || 1) || 1)).toFixed(2));
     if (fresh) {
       try {
-        lastRequestedType = (key === "OVER1" ? "DIGITOVER" : "DIGITUNDER");
-        lastBuyContext = { type: lastRequestedType, barrier: (key === "OVER1" ? "1" : "9"), qty: 1, retried: false };
+        const ct = keyBase === "OVER" ? "DIGITOVER" : "DIGITUNDER";
+        lastRequestedType = ct;
+        lastBuyContext = { type: ct, barrier: String(B), qty: 1, retried: false };
         // If this path is used by auto trading, apply EV gate
         if (autoTrade && CONFIG.USE_EV_FILTER) {
           const pImplied = impliedProb(cached.ask, cached.payout);
@@ -2298,7 +2339,7 @@
         }
         placingTrade = true; updateUILock();
         wsSend({ buy: cached.id, price: priceToUse });
-        log(`Strike Pro fast buy (${key === "OVER1" ? "OVER 1" : "UNDER 9"}) @ ${fmt2c(priceToUse)}`, "win");
+        log(`Strike Pro fast buy (${keyBase} ${B}) @ ${fmt2c(priceToUse)}`, "win");
         return true;
       } catch (e) {
         log(`Strike Pro fast buy failed: ${e.message || e}`, "loss");
@@ -2643,8 +2684,8 @@
         if (ct === "DIGITDIFF" && barrier != null) proposalInFlight.set(barrier, false);
         if (ct === "DIGITEVEN") eoProposalInFlight.set("EVEN", false);
         if (ct === "DIGITODD") eoProposalInFlight.set("ODD", false);
-        if (ct === "DIGITOVER" && barrier === "1") strikeProposalInFlight.set("OVER1", false);
-        if (ct === "DIGITUNDER" && barrier === "9") strikeProposalInFlight.set("UNDER9", false);
+  if (ct === "DIGITOVER" && barrier != null) strikeProposalInFlight.set(`OVER${barrier}`, false);
+  if (ct === "DIGITUNDER" && barrier != null) strikeProposalInFlight.set(`UNDER${barrier}`, false);
 
         if (ct === "DIGITDIFF" && barrier != null && pid) {
           const prev = proposalCache.get(barrier) || {};
@@ -2656,7 +2697,7 @@
           eoProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask, payout });
         }
         if ((ct === "DIGITOVER" || ct === "DIGITUNDER") && pid) {
-          const key = ct === "DIGITOVER" ? "OVER1" : "UNDER9";
+          const key = `${ct === "DIGITOVER" ? 'OVER' : 'UNDER'}${barrier ?? ''}`;
           const prev = strikeProposalCache.get(key) || {};
           strikeProposalCache.set(key, { id: pid, ts: Date.now(), stake: prev.stake, ask, payout });
         }
@@ -2699,8 +2740,8 @@
             const tag =
               (ct === "DIGITEVEN" || ct === "DIGITODD") ? "Flip X" :
               (ct === "DIGITDIFF" ? "Z Trade" :
-              (ct === "DIGITOVER" ? "Strike Pro • OVER 1" :
-              (ct === "DIGITUNDER" ? "Strike Pro • UNDER 9" : ct)));
+              (ct === "DIGITOVER" ? `Strike Pro • OVER ${barrier}` :
+              (ct === "DIGITUNDER" ? `Strike Pro • UNDER ${barrier}` : ct)));
             log(`Buying ${tag}${barrier ? "/b=" + barrier : ""} x${qty} @ ${fmt2c(priceToUse)}`, "win");
           } catch (e) {
             log("Buy send error: " + (e.message || e), "loss");
@@ -2726,9 +2767,11 @@
               } else if (lastBuyContext.type === 'DIGITODD') {
                 eoProposalCache.delete('ODD');
               } else if (lastBuyContext.type === 'DIGITOVER') {
-                strikeProposalCache.delete('OVER1');
+                const b = String(lastBuyContext.barrier ?? '');
+                strikeProposalCache.delete(`OVER${b}`);
               } else if (lastBuyContext.type === 'DIGITUNDER') {
-                strikeProposalCache.delete('UNDER9');
+                const b = String(lastBuyContext.barrier ?? '');
+                strikeProposalCache.delete(`UNDER${b}`);
               }
             } catch {}
           }
@@ -2755,7 +2798,7 @@
               log(`Bolt opened id=${cid} buy=${fmt2c(openAccuBuyPrice)}`, "win");
             } else if (type === "DIGITDIFF") log(`Z Trade contract ${cid}`, "win");
             else if (type === "DIGITEVEN" || type === "DIGITODD") log(`Flip X ${type === "DIGITEVEN" ? "EVEN" : "ODD"} contract ${cid}`, "win");
-            else if (type === "DIGITOVER" || type === "DIGITUNDER") log(`Strike Pro ${type === "DIGITOVER" ? "OVER 1" : "UNDER 9"} contract ${cid}`, "win");
+            else if (type === "DIGITOVER" || type === "DIGITUNDER") log(`Strike Pro ${type === "DIGITOVER" ? `OVER ${lastBuyContext?.barrier ?? ''}` : `UNDER ${lastBuyContext?.barrier ?? ''}`} contract ${cid}`, "win");
 
             // Auto batch progress
             if (autoTrade) {
@@ -2866,6 +2909,7 @@
         useDiff: useDiffersVsLast,
         useEO: useEvenOdd,
         useStrike: useStrikePro,
+  spBarrier: String(strikeBarrier),
         conf: confThresholdInput?.value || String(CONFIG.CONFIDENCE_THRESHOLD),
         maxLS: maxLossStreakInput?.value || String(CONFIG.MAX_LOSS_STREAK),
         accuG: accuGrowthInput?.value || "1.0",
@@ -2910,6 +2954,13 @@
         flipxDelayTicksInput.value = d.flipxDelay;
         setFlipXDelaySetting();
       }
+
+      if (typeof d.spBarrier !== 'undefined') {
+        const v = clamp(Number(d.spBarrier) || 1, 0, 9);
+        strikeBarrier = v;
+        if (strikeBarrierInput) strikeBarrierInput.value = String(v);
+      }
+      updateStrikeBarrierLabels();
 
       autoTradesPlanned = clamp(Number(d.autoCount) || 1, 1, 10);
       if (!autoTradeCountInput) {
@@ -3000,6 +3051,16 @@
     } else { useStrikePro = false; }
     setStrategyUI();
   });
+  if (strikeBarrierInput) strikeBarrierInput.addEventListener("change", (e) => {
+    const v = clamp(Number(e.target.value) || 1, 0, 9);
+    strikeBarrier = v;
+    e.target.value = String(v);
+    updateStrikeBarrierLabels();
+    saveSettings();
+    // Clear cached strike proposals for previous barriers to avoid mismatches
+    try { strikeProposalCache.clear(); strikeProposalInFlight.clear(); } catch {}
+    log(`Strike Pro barrier set to ${v}`);
+  });
 
   // Inputs & settings
   if (stakeInput) stakeInput.addEventListener("change", saveSettings);
@@ -3087,14 +3148,15 @@
       log(`Strike Pro confidence ${sp.confidence}% below ${CONFIG.STRIKEPRO_MIN_CONFIDENCE}%`, "loss");
       return;
     }
-    if (sp.outcome === "OVER1") {
+    const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+    if (sp.outcome === "OVER") {
       autoAdjustSymbolForStrategy("DIGITOVER");
-      const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("OVER1");
-      if (!didFast) strikeSchedule("DIGITOVER", "1");
+      const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("OVER");
+      if (!didFast) strikeSchedule("DIGITOVER", String(B));
     } else {
       autoAdjustSymbolForStrategy("DIGITUNDER");
-      const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("UNDER9");
-      if (!didFast) strikeSchedule("DIGITUNDER", "9");
+      const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("UNDER");
+      if (!didFast) strikeSchedule("DIGITUNDER", String(B));
     }
     ticksSinceLastTrade = 0;
   });
@@ -3104,9 +3166,10 @@
     if (!useStrikePro) { log("Enable Strike Pro first.", "loss"); return; }
     if (!SUPPORTED.DIGITS.has(activeSymbol)) { log("Strike Pro unsupported on this symbol.", "loss"); return; }
     if (!strikeCooldownOk()) { log("Strike Pro cooldown active. Wait a moment.", "loss"); return; }
-    autoAdjustSymbolForStrategy("DIGITOVER");
-    const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("OVER1");
-    if (!didFast) strikeSchedule("DIGITOVER", "1");
+  const B1 = clamp(Number(strikeBarrier) || 0, 0, 9);
+  autoAdjustSymbolForStrategy("DIGITOVER");
+  const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("OVER");
+  if (!didFast) strikeSchedule("DIGITOVER", String(B1));
     ticksSinceLastTrade = 0;
   });
 
@@ -3115,9 +3178,10 @@
     if (!useStrikePro) { log("Enable Strike Pro first.", "loss"); return; }
     if (!SUPPORTED.DIGITS.has(activeSymbol)) { log("Strike Pro unsupported on this symbol.", "loss"); return; }
     if (!strikeCooldownOk()) { log("Strike Pro cooldown active. Wait a moment.", "loss"); return; }
-    autoAdjustSymbolForStrategy("DIGITUNDER");
-    const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("UNDER9");
-    if (!didFast) strikeSchedule("DIGITUNDER", "9");
+  const B2 = clamp(Number(strikeBarrier) || 0, 0, 9);
+  autoAdjustSymbolForStrategy("DIGITUNDER");
+  const didFast = CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached("UNDER");
+  if (!didFast) strikeSchedule("DIGITUNDER", String(B2));
     ticksSinceLastTrade = 0;
   });
 
@@ -3127,9 +3191,10 @@
     if (!useStrikePro) { log("Enable Strike Pro first.", "loss"); return; }
     if (!SUPPORTED.DIGITS.has(activeSymbol)) { log("Strike Pro unsupported on this symbol.", "loss"); return; }
     autoAdjustSymbolForStrategy(over ? "DIGITOVER" : "DIGITUNDER");
-    const key = over ? "OVER1" : "UNDER9";
+    const B = clamp(Number(strikeBarrier) || 0, 0, 9);
+    const key = over ? "OVER" : "UNDER";
     const ct = over ? "DIGITOVER" : "DIGITUNDER";
-    const barrier = over ? "1" : "9";
+    const barrier = String(B);
     let boughtFast = 0;
     if (CONFIG.STRIKEPRO_FAST_BUY_FROM_CACHE && strikeBuyImmediateIfCached(key)) {
       boughtFast = 1;

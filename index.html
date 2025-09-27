@@ -208,7 +208,7 @@
                 <span class="slider"></span>
               </label>
             </div>
-            <p class="hint">Predicts Over 1 vs Under 9 with direction synergy.</p>
+            <p class="hint">Predicts Over/Under vs your barrier with direction synergy.</p>
           </div>
         </div>
       </section>
@@ -464,6 +464,12 @@
             </select>
           </div>
 
+          <div class="control-group hidden" id="strikeBarrierGroup">
+            <label for="strikeBarrier" class="lbl">Strike Barrier (0–9)</label>
+            <input id="strikeBarrier" type="number" min="0" max="9" step="1" value="1" class="input" />
+            <small class="hint">Used for both Over and Under contracts.</small>
+          </div>
+
           <div class="control-group">
             <label for="stake" class="lbl">Stake Amount</label>
             <input id="stake" type="number" min="0.35" step="0.01" value="1.00" class="input" />
@@ -507,10 +513,10 @@
           </div>
           <div id="strikeActions" class="action-row hidden">
             <button id="strikePlaceTradeBtn" class="btn btn-single">Place Trade</button>
-            <button id="strikePlaceOverBtn" class="btn btn-even">Place Over 1</button>
-            <button id="strikePlaceUnderBtn" class="btn btn-odd">Place Under 9</button>
-            <button id="strikeBuy3OverBtn" class="btn btn-burst-3x">⚡ Buy 3x Over 1</button>
-            <button id="strikeBuy3UnderBtn" class="btn btn-burst-3x-alt">⚡ Buy 3x Under 9</button>
+            <button id="strikePlaceOverBtn" class="btn btn-even">Place Over (<span id="strikeBarrierLabel">1</span>)</button>
+            <button id="strikePlaceUnderBtn" class="btn btn-odd">Place Under (<span id="strikeBarrierLabel2">1</span>)</button>
+            <button id="strikeBuy3OverBtn" class="btn btn-burst-3x">⚡ Buy 3x Over (<span id="strikeBarrierLabel3">1</span>)</button>
+            <button id="strikeBuy3UnderBtn" class="btn btn-burst-3x-alt">⚡ Buy 3x Under (<span id="strikeBarrierLabel4">1</span>)</button>
           </div>
         </div>
       </section>
